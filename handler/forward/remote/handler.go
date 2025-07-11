@@ -5,7 +5,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net"
+	"slices"
 	"strconv"
 	"time"
 
@@ -156,6 +158,11 @@ func (h *forwardHandler) Handle(ctx context.Context, conn net.Conn, opts ...hand
 
 		br := bufio.NewReader(conn)
 		proto, _ = sniffing.Sniff(ctx, br)
+
+		if !h.checkBlockProtocol(proto) {
+			return fmt.Errorf("block protocol: %s", proto)
+		}
+
 		ro.Proto = proto
 
 		if h.md.sniffingTimeout > 0 {
@@ -270,6 +277,13 @@ func (h *forwardHandler) Handle(ctx context.Context, conn net.Conn, opts ...hand
 	}).Infof("%s >-< %s", conn.RemoteAddr(), target.Addr)
 
 	return nil
+}
+
+func (h *forwardHandler) checkBlockProtocol(proto string) bool {
+	if len(h.md.blockProtocol) == 0 {
+		return true
+	}
+	return !slices.Contains(h.md.blockProtocol, proto)
 }
 
 func (h *forwardHandler) checkRateLimit(addr net.Addr) bool {
