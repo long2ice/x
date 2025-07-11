@@ -12,29 +12,35 @@ import (
 )
 
 const (
-	ProtoHTTP = "http"
-	ProtoTLS  = "tls"
-	ProtoSSH  = "ssh"
+	ProtoHTTP  = "http"
+	ProtoTLS   = "tls"
+	ProtoSSH   = "ssh"
+	ProtoSocks = "socks"
 )
 
 func Sniff(ctx context.Context, r *bufio.Reader) (proto string, err error) {
-	hdr, err := r.Peek(dissector.RecordHeaderLen)
+	hdr, err := r.Peek(1)
 	if err != nil {
 		return
 	}
-
+	// try to sniff socks traffic
+	if isSocks(hdr[0]) {
+		return ProtoSocks, nil
+	}
+	hdr, err = r.Peek(dissector.RecordHeaderLen)
+	if err != nil {
+		return ProtoSocks, nil
+	}
 	// try to sniff TLS traffic
 	tlsVersion := binary.BigEndian.Uint16(hdr[1:3])
 	if hdr[0] == dissector.Handshake &&
 		(tlsVersion >= tls.VersionTLS10 && tlsVersion <= tls.VersionTLS13) {
 		return ProtoTLS, nil
 	}
-
 	// try to sniff HTTP traffic
 	if isHTTP(string(hdr[:])) {
 		return ProtoHTTP, nil
 	}
-
 	if string(hdr) == "SSH-2" {
 		return ProtoSSH, nil
 	}
@@ -55,4 +61,8 @@ func isHTTP(s string) bool {
 		// HTTP/2 connection preface
 		// PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n
 		strings.HasPrefix(s, "PRI *")
+}
+
+func isSocks(b byte) bool {
+	return b == 0x04 || b == 0x05
 }
