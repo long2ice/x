@@ -26,6 +26,8 @@ type metadata struct {
 	privateKey  crypto.PrivateKey
 	alpn        string
 	mitmBypass  bypass.Bypass
+
+	blockProtocol []string
 }
 
 func (h *forwardHandler) parseMetadata(md mdata.Metadata) (err error) {
@@ -39,6 +41,8 @@ func (h *forwardHandler) parseMetadata(md mdata.Metadata) (err error) {
 	h.md.sniffingTimeout = mdutil.GetDuration(md, "sniffing.timeout")
 	h.md.sniffingWebsocket = mdutil.GetBool(md, "sniffing.websocket")
 	h.md.sniffingWebsocketSampleRate = mdutil.GetFloat(md, "sniffing.websocket.sampleRate")
+
+	h.md.blockProtocol = mdutil.GetStrings(md, "blockProtocol")
 
 	h.md.httpKeepalive = mdutil.GetBool(md, "http.keepalive")
 
