@@ -2,7 +2,6 @@ package ws
 
 import (
 	"context"
-	"crypto/tls"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -16,6 +15,7 @@ import (
 	xnet "github.com/go-gost/x/internal/net"
 	xhttp "github.com/go-gost/x/internal/net/http"
 	"github.com/go-gost/x/internal/net/proxyproto"
+	xtls "github.com/go-gost/x/internal/util/tls"
 	ws_util "github.com/go-gost/x/internal/util/ws"
 	climiter "github.com/go-gost/x/limiter/conn/wrapper"
 	limiter_wrapper "github.com/go-gost/x/limiter/traffic/wrapper"
@@ -111,7 +111,7 @@ func (l *wsListener) Init(md md.Metadata) (err error) {
 	ln = climiter.WrapListener(l.options.ConnLimiter, ln)
 
 	if l.tlsEnabled {
-		ln = tls.NewListener(ln, l.options.TLSConfig)
+		ln = xtls.NewListener(ln, l.options.TLSConfig)
 	}
 
 	l.addr = ln.Addr()
@@ -159,36 +159,35 @@ func (l *wsListener) Addr() net.Addr {
 
 func (l *wsListener) upgrade(w http.ResponseWriter, r *http.Request) {
 	clientIP := xhttp.GetClientIP(r)
-	if l.logger.IsLevelEnabled(logger.TraceLevel) {
-		sip := ""
-		if clientIP != nil {
-			sip = clientIP.String()
-		}
-		log := l.logger.WithFields(map[string]any{
-			"local":    l.addr.String(),
-			"remote":   r.RemoteAddr,
-			"clientIP": sip,
-		})
+	cip := ""
+	if clientIP != nil {
+		cip = clientIP.String()
+	}
+	log := l.logger.WithFields(map[string]any{
+		"local":  l.addr.String(),
+		"remote": r.RemoteAddr,
+		"client": cip,
+	})
+	if log.IsLevelEnabled(logger.TraceLevel) {
 		dump, _ := httputil.DumpRequest(r, false)
 		log.Trace(string(dump))
 	}
 
 	conn, err := l.upgrader.Upgrade(w, r, l.md.header)
 	if err != nil {
-		l.logger.Error(err)
-		w.WriteHeader(http.StatusInternalServerError)
+		log.Error(err)
 		return
 	}
 
-	var clientAddr net.Addr
+	var srcAddr net.Addr
 	if clientIP != nil {
-		clientAddr = &net.IPAddr{IP: clientIP}
+		srcAddr = &net.TCPAddr{IP: clientIP}
 	}
 
 	select {
-	case l.cqueue <- ws_util.ConnWithClientAddr(conn, clientAddr):
+	case l.cqueue <- ws_util.ConnWithSrcAddr(conn, srcAddr):
 	default:
 		conn.Close()
-		l.logger.Warnf("connection queue is full, client %s discarded", conn.RemoteAddr())
+		log.Warnf("connection queue is full, client %s discarded", conn.RemoteAddr())
 	}
 }

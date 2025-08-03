@@ -11,6 +11,7 @@ import (
 	"github.com/go-gost/core/limiter"
 	"github.com/go-gost/core/limiter/traffic"
 	"github.com/go-gost/core/metadata"
+	xio "github.com/go-gost/x/internal/io"
 	xnet "github.com/go-gost/x/internal/net"
 	"github.com/go-gost/x/internal/net/udp"
 )
@@ -104,6 +105,34 @@ func (c *limitConn) Metadata() metadata.Metadata {
 		return md.Metadata()
 	}
 	return nil
+}
+
+func (c *limitConn) SrcAddr() net.Addr {
+	if sc, ok := c.Conn.(xnet.SrcAddr); ok {
+		return sc.SrcAddr()
+	}
+	return nil
+}
+
+func (c *limitConn) DstAddr() net.Addr {
+	if sc, ok := c.Conn.(xnet.DstAddr); ok {
+		return sc.DstAddr()
+	}
+	return nil
+}
+
+func (c *limitConn) CloseRead() error {
+	if sc, ok := c.Conn.(xio.CloseRead); ok {
+		return sc.CloseRead()
+	}
+	return xio.ErrUnsupported
+}
+
+func (c *limitConn) CloseWrite() error {
+	if sc, ok := c.Conn.(xio.CloseWrite); ok {
+		return sc.CloseWrite()
+	}
+	return xio.ErrUnsupported
 }
 
 type packetConn struct {

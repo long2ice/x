@@ -133,12 +133,8 @@ func (h *httpHandler) Handle(ctx context.Context, conn net.Conn, opts ...handler
 		SID:        string(ctxvalue.SidFromContext(ctx)),
 	}
 
-	ro.ClientIP = conn.RemoteAddr().String()
-	if clientAddr := ctxvalue.ClientAddrFromContext(ctx); clientAddr != "" {
-		ro.ClientIP = string(clientAddr)
-	}
-	if h, _, _ := net.SplitHostPort(ro.ClientIP); h != "" {
-		ro.ClientIP = h
+	if srcAddr := ctxvalue.SrcAddrFromContext(ctx); srcAddr != nil {
+		ro.ClientIP = srcAddr.String()
 	}
 
 	log := h.options.Logger.WithFields(map[string]any{
@@ -362,14 +358,13 @@ func (h *httpHandler) handleRequest(ctx context.Context, conn net.Conn, req *htt
 	ro.Src = cc.LocalAddr().String()
 	ro.Dst = cc.RemoteAddr().String()
 
-	resp.StatusCode = http.StatusOK
-	resp.Status = "200 Connection established"
+	b := []byte("HTTP/1.1 200 Connection established\r\n" +
+		"Proxy-Agent: " + h.md.proxyAgent + "\r\n\r\n")
 
 	if log.IsLevelEnabled(logger.TraceLevel) {
-		dump, _ := httputil.DumpResponse(resp, false)
-		log.Trace(string(dump))
+		log.Trace(string(b))
 	}
-	if err = resp.Write(conn); err != nil {
+	if _, err = conn.Write(b); err != nil {
 		log.Error(err)
 		return err
 	}
@@ -427,7 +422,8 @@ func (h *httpHandler) handleRequest(ctx context.Context, conn net.Conn, req *htt
 
 	start := time.Now()
 	log.Infof("%s <-> %s", conn.RemoteAddr(), addr)
-	xnet.Transport(conn, cc)
+	// xnet.Transport(conn, cc)
+	xnet.Pipe(ctx, conn, cc)
 	log.WithFields(map[string]any{
 		"duration": time.Since(start),
 	}).Infof("%s >-< %s", conn.RemoteAddr(), addr)
@@ -462,13 +458,13 @@ func (h *httpHandler) handleProxy(ctx context.Context, conn net.Conn, req *http.
 			log.Trace(string(dump))
 		}
 
-		if close, err := h.proxyRoundTrip(ctx, xio.NewReadWriter(br, conn), req, ro, &pStats, log); err != nil || close {
+		if close, err := h.proxyRoundTrip(ctx, xio.NewReadWriteCloser(br, conn, conn), req, ro, &pStats, log); err != nil || close {
 			return err
 		}
 	}
 }
 
-func (h *httpHandler) proxyRoundTrip(ctx context.Context, rw io.ReadWriter, req *http.Request, ro *xrecorder.HandlerRecorderObject, pStats stats.Stats, log logger.Logger) (close bool, err error) {
+func (h *httpHandler) proxyRoundTrip(ctx context.Context, rw io.ReadWriteCloser, req *http.Request, ro *xrecorder.HandlerRecorderObject, pStats stats.Stats, log logger.Logger) (close bool, err error) {
 	close = true
 
 	ro2 := &xrecorder.HandlerRecorderObject{}
@@ -515,16 +511,6 @@ func (h *httpHandler) proxyRoundTrip(ctx context.Context, rw io.ReadWriter, req 
 			ContentLength: req.ContentLength,
 			Header:        req.Header.Clone(),
 		},
-	}
-	if clientIP := xhttp.GetClientIP(req); clientIP != nil {
-		ro.ClientIP = clientIP.String()
-	}
-
-	clientAddr := ro.RemoteAddr
-	if ro.ClientIP != "" {
-		if _, port, _ := net.SplitHostPort(ro.RemoteAddr); port != "" {
-			clientAddr = net.JoinHostPort(ro.ClientIP, port)
-		}
 	}
 
 	// HTTP/1.0
@@ -579,7 +565,6 @@ func (h *httpHandler) proxyRoundTrip(ctx context.Context, rw io.ReadWriter, req 
 		}
 	}
 
-	ctx = ctxvalue.ContextWithClientAddr(ctx, ctxvalue.ClientAddr(clientAddr))
 	ctx = ctx_internal.ContextWithRecorderObject(ctx, ro)
 	ctx = ctxvalue.ContextWithLogger(ctx, log)
 
@@ -665,6 +650,11 @@ func (h *httpHandler) dial(ctx context.Context, network, addr string) (conn net.
 	conn, err = h.options.Router.Dial(ctxvalue.ContextWithBuffer(ctx, &buf), network, addr)
 	if ro := ctx_internal.RecorderObjectFromContext(ctx); ro != nil {
 		ro.Route = buf.String()
+
+		if conn != nil {
+			ro.Src = conn.LocalAddr().String()
+			ro.Dst = conn.RemoteAddr().String()
+		}
 	}
 
 	return
@@ -677,7 +667,7 @@ func upgradeType(h http.Header) string {
 	return h.Get("Upgrade")
 }
 
-func (h *httpHandler) handleUpgradeResponse(ctx context.Context, rw io.ReadWriter, req *http.Request, res *http.Response, ro *xrecorder.HandlerRecorderObject, log logger.Logger) error {
+func (h *httpHandler) handleUpgradeResponse(ctx context.Context, rw io.ReadWriteCloser, req *http.Request, res *http.Response, ro *xrecorder.HandlerRecorderObject, log logger.Logger) error {
 	reqUpType := upgradeType(req.Header)
 	resUpType := upgradeType(res.Header)
 	if !strings.EqualFold(reqUpType, resUpType) {
@@ -698,7 +688,8 @@ func (h *httpHandler) handleUpgradeResponse(ctx context.Context, rw io.ReadWrite
 		return h.sniffingWebsocketFrame(ctx, rw, backConn, ro, log)
 	}
 
-	return xnet.Transport(rw, backConn)
+	// return xnet.Transport(rw, backConn)
+	return xnet.Pipe(ctx, rw, backConn)
 }
 
 func (h *httpHandler) sniffingWebsocketFrame(ctx context.Context, rw, cc io.ReadWriter, ro *xrecorder.HandlerRecorderObject, log logger.Logger) error {
@@ -896,7 +887,8 @@ func (h *httpHandler) authenticate(ctx context.Context, conn net.Conn, req *http
 			defer cc.Close()
 
 			req.Write(cc)
-			xnet.Transport(conn, cc)
+			// xnet.Transport(conn, cc)
+			xnet.Pipe(ctx, conn, cc)
 			return
 		case "file":
 			f, _ := os.Open(pr.Value)

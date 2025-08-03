@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net"
 	"slices"
-	"strconv"
 	"time"
 
 	"github.com/go-gost/core/chain"
@@ -93,15 +92,8 @@ func (h *forwardHandler) Handle(ctx context.Context, conn net.Conn, opts ...hand
 		SID:        string(ctxvalue.SidFromContext(ctx)),
 	}
 
-	ro.ClientIP = conn.RemoteAddr().String()
-	if clientAddr := ctxvalue.ClientAddrFromContext(ctx); clientAddr != "" {
-		ro.ClientIP = string(clientAddr)
-	} else {
-		ctx = ctxvalue.ContextWithClientAddr(ctx, ctxvalue.ClientAddr(conn.RemoteAddr().String()))
-	}
-
-	if h, _, _ := net.SplitHostPort(ro.ClientIP); h != "" {
-		ro.ClientIP = h
+	if srcAddr := ctxvalue.SrcAddrFromContext(ctx); srcAddr != nil {
+		ro.ClientIP = srcAddr.String()
 	}
 
 	log := h.options.Logger.WithFields(map[string]any{
@@ -173,6 +165,13 @@ func (h *forwardHandler) Handle(ctx context.Context, conn net.Conn, opts ...hand
 			var buf bytes.Buffer
 			cc, err := h.options.Router.Dial(ctxvalue.ContextWithBuffer(ctx, &buf), "tcp", address)
 			ro.Route = buf.String()
+
+			cc = proxyproto.WrapClientConn(
+				h.md.proxyProtocol,
+				ctxvalue.SrcAddrFromContext(ctx),
+				ctxvalue.DstAddrFromContext(ctx),
+				cc)
+
 			return cc, err
 		}
 		sniffer := &forwarder.Sniffer{
@@ -267,11 +266,16 @@ func (h *forwardHandler) Handle(ctx context.Context, conn net.Conn, opts ...hand
 	ro.Src = cc.LocalAddr().String()
 	ro.Dst = cc.RemoteAddr().String()
 
-	cc = proxyproto.WrapClientConn(h.md.proxyProtocol, conn.RemoteAddr(), convertAddr(conn.LocalAddr()), cc)
+	cc = proxyproto.WrapClientConn(
+		h.md.proxyProtocol,
+		ctxvalue.SrcAddrFromContext(ctx),
+		ctxvalue.DstAddrFromContext(ctx),
+		cc)
 
 	t := time.Now()
 	log.Infof("%s <-> %s", conn.RemoteAddr(), target.Addr)
-	xnet.Transport(conn, cc)
+	// xnet.Transport(conn, cc)
+	xnet.Pipe(ctx, conn, cc)
 	log.WithFields(map[string]any{
 		"duration": time.Since(t),
 	}).Infof("%s >-< %s", conn.RemoteAddr(), target.Addr)
@@ -296,28 +300,4 @@ func (h *forwardHandler) checkRateLimit(addr net.Addr) bool {
 	}
 
 	return true
-}
-
-func convertAddr(addr net.Addr) net.Addr {
-	host, sp, _ := net.SplitHostPort(addr.String())
-	ip := net.ParseIP(host)
-	port, _ := strconv.Atoi(sp)
-
-	if ip == nil || ip.Equal(net.IPv6zero) {
-		ip = net.IPv4zero
-	}
-
-	switch addr.Network() {
-	case "tcp", "tcp4", "tcp6":
-		return &net.TCPAddr{
-			IP:   ip,
-			Port: port,
-		}
-
-	default:
-		return &net.UDPAddr{
-			IP:   ip,
-			Port: port,
-		}
-	}
 }

@@ -24,6 +24,7 @@ import (
 	xnet "github.com/go-gost/x/internal/net"
 	xmetrics "github.com/go-gost/x/metrics"
 	xstats "github.com/go-gost/x/observer/stats"
+	"github.com/google/shlex"
 	"github.com/rs/xid"
 )
 
@@ -159,6 +160,8 @@ func (s *defaultService) Serve() error {
 		defer v.Dec()
 	}
 
+	log := s.options.logger
+
 	var wg sync.WaitGroup
 	defer wg.Wait()
 
@@ -183,15 +186,17 @@ func (s *defaultService) Serve() error {
 
 				s.setState(StateFailed)
 
-				s.options.logger.Warnf("accept: %v, retrying in %v", e, tempDelay)
+				log.Warnf("accept: %v, retrying in %v", e, tempDelay)
 				time.Sleep(tempDelay)
 				continue
 			}
 			s.setState(StateClosed)
 
 			if !errors.Is(e, net.ErrClosed) {
-				s.options.logger.Errorf("accept: %v", e)
+				log.Errorf("accept: %v", e)
 			}
+
+			log.Debugf("service %s exited!", s.name)
 
 			return e
 		}
@@ -201,25 +206,37 @@ func (s *defaultService) Serve() error {
 			s.setState(StateReady)
 		}
 
-		clientAddr := conn.RemoteAddr().String()
-		if ca, ok := conn.(xnet.ClientAddr); ok {
-			if addr := ca.ClientAddr(); addr != nil {
-				clientAddr = addr.String()
-			}
-		}
-		clientIP := clientAddr
-		if h, _, _ := net.SplitHostPort(clientAddr); h != "" {
-			clientIP = h
-		}
-
 		sid := xid.New().String()
 		ctx := ctxvalue.ContextWithSid(ctx, ctxvalue.Sid(sid))
-		ctx = ctxvalue.ContextWithClientAddr(ctx, ctxvalue.ClientAddr(clientAddr))
-		ctx = ctxvalue.ContextWithHash(ctx, &ctxvalue.Hash{Source: clientIP})
 
 		log := s.options.logger.WithFields(map[string]any{
 			"sid": sid,
 		})
+
+		srcAddr := conn.RemoteAddr()
+		if a, ok := conn.(xnet.SrcAddr); ok {
+			if addr := a.SrcAddr(); addr != nil {
+				srcAddr = addr
+			}
+		}
+		ctx = ctxvalue.ContextWithSrcAddr(ctx, srcAddr)
+
+		clientAddr := srcAddr.String()
+		ctx = ctxvalue.ContextWithClientAddr(ctx, ctxvalue.ClientAddr(clientAddr))
+
+		dstAddr := conn.LocalAddr()
+		if a, ok := conn.(xnet.DstAddr); ok {
+			if addr := a.DstAddr(); addr != nil {
+				dstAddr = addr
+			}
+		}
+		ctx = ctxvalue.ContextWithDstAddr(ctx, dstAddr)
+
+		clientIP := clientAddr
+		if h, _, _ := net.SplitHostPort(clientIP); h != "" {
+			clientIP = h
+		}
+		ctx = ctxvalue.ContextWithHash(ctx, &ctxvalue.Hash{Source: clientIP})
 
 		for _, rec := range s.options.recorders {
 			if rec.Record == recorder.RecorderServiceClientAddress {
@@ -230,9 +247,9 @@ func (s *defaultService) Serve() error {
 			}
 		}
 		if s.options.admission != nil &&
-			!s.options.admission.Admit(ctx, clientAddr) {
+			!s.options.admission.Admit(ctx, srcAddr.String()) {
 			conn.Close()
-			log.Debugf("admission: %s is denied", clientAddr)
+			log.Debugf("admission: %s is denied", srcAddr)
 			continue
 		}
 
@@ -296,10 +313,24 @@ func (s *defaultService) execCmds(phase string, cmds []string) {
 		}
 		s.options.logger.Info(cmd)
 
-		if err := exec.Command("/bin/sh", "-c", cmd).Run(); err != nil {
+		if err := s.execCmd(cmd); err != nil {
 			s.options.logger.Warnf("[%s] %s: %v", phase, cmd, err)
 		}
 	}
+}
+
+func (s *defaultService) execCmd(cmd string) error {
+	ss, err := shlex.Split(cmd)
+	if err != nil {
+		return err
+	}
+	if len(ss) == 0 {
+		return errors.New("invalid command")
+	}
+	c := exec.Command(ss[0], ss[1:]...)
+	// c.Stdout = os.Stdout
+	// c.Stderr = os.Stderr
+	return c.Run()
 }
 
 func (s *defaultService) setState(state State) {

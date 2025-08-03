@@ -39,6 +39,8 @@ import (
 )
 
 const (
+	DefaultReadTimeout = 30 * time.Second
+
 	// DefaultBodySize is the default HTTP body or websocket frame size to record.
 	DefaultBodySize = 64 * 1024 // 64KB
 	// MaxBodySize is the maximum HTTP body or websocket frame size to record.
@@ -113,6 +115,10 @@ func (h *Sniffer) HandleHTTP(ctx context.Context, conn net.Conn, opts ...HandleO
 	var ho HandleOptions
 	for _, opt := range opts {
 		opt(&ho)
+	}
+
+	if h.ReadTimeout <= 0 {
+		h.ReadTimeout = DefaultReadTimeout
 	}
 
 	pStats := xstats.Stats{}
@@ -192,7 +198,7 @@ func (h *Sniffer) HandleHTTP(ctx context.Context, conn net.Conn, opts ...HandleO
 	ro.Dst = cc.RemoteAddr().String()
 	ro.Time = time.Time{}
 
-	shouldClose, err := h.httpRoundTrip(ctx, xio.NewReadWriter(br, conn), cc, req, ro, &pStats, log)
+	shouldClose, err := h.httpRoundTrip(ctx, xio.NewReadWriteCloser(br, conn, conn), cc, req, ro, &pStats, log)
 	if err != nil || shouldClose {
 		return err
 	}
@@ -213,7 +219,7 @@ func (h *Sniffer) HandleHTTP(ctx context.Context, conn net.Conn, opts ...HandleO
 			log.Trace(string(dump))
 		}
 
-		if shouldClose, err := h.httpRoundTrip(ctx, xio.NewReadWriter(br, conn), cc, req, ro, &pStats, log); err != nil || shouldClose {
+		if shouldClose, err := h.httpRoundTrip(ctx, xio.NewReadWriteCloser(br, conn, conn), cc, req, ro, &pStats, log); err != nil || shouldClose {
 			return err
 		}
 	}
@@ -271,7 +277,7 @@ func (h *Sniffer) serveH2(ctx context.Context, conn net.Conn, ho *HandleOptions)
 	return nil
 }
 
-func (h *Sniffer) httpRoundTrip(ctx context.Context, rw, cc io.ReadWriter, req *http.Request, ro *xrecorder.HandlerRecorderObject, pStats stats.Stats, log logger.Logger) (close bool, err error) {
+func (h *Sniffer) httpRoundTrip(ctx context.Context, rw, cc io.ReadWriteCloser, req *http.Request, ro *xrecorder.HandlerRecorderObject, pStats stats.Stats, log logger.Logger) (close bool, err error) {
 	close = true
 
 	ro2 := &xrecorder.HandlerRecorderObject{}
@@ -427,7 +433,7 @@ func upgradeType(h http.Header) string {
 	return h.Get("Upgrade")
 }
 
-func (h *Sniffer) handleUpgradeResponse(ctx context.Context, rw io.ReadWriter, cc io.ReadWriter, req *http.Request, res *http.Response, ro *xrecorder.HandlerRecorderObject, log logger.Logger) error {
+func (h *Sniffer) handleUpgradeResponse(ctx context.Context, rw, cc io.ReadWriteCloser, req *http.Request, res *http.Response, ro *xrecorder.HandlerRecorderObject, log logger.Logger) error {
 	reqUpType := upgradeType(req.Header)
 	resUpType := upgradeType(res.Header)
 	if !strings.EqualFold(reqUpType, resUpType) {
@@ -443,7 +449,8 @@ func (h *Sniffer) handleUpgradeResponse(ctx context.Context, rw io.ReadWriter, c
 		return h.sniffingWebsocketFrame(ctx, rw, cc, ro, log)
 	}
 
-	return xnet.Transport(rw, cc)
+	// return xnet.Transport(rw, cc)
+	return xnet.Pipe(ctx, rw, cc)
 }
 
 func (h *Sniffer) sniffingWebsocketFrame(ctx context.Context, rw, cc io.ReadWriter, ro *xrecorder.HandlerRecorderObject, log logger.Logger) error {
@@ -570,6 +577,10 @@ func (h *Sniffer) HandleTLS(ctx context.Context, conn net.Conn, opts ...HandleOp
 		opt(&ho)
 	}
 
+	if h.ReadTimeout <= 0 {
+		h.ReadTimeout = DefaultReadTimeout
+	}
+
 	buf := new(bytes.Buffer)
 	clientHello, err := dissector.ParseClientHello(io.TeeReader(conn, buf))
 	if err != nil {
@@ -653,7 +664,8 @@ func (h *Sniffer) HandleTLS(ctx context.Context, conn net.Conn, opts ...HandleOp
 	}
 
 	log.Infof("%s <-> %s", ro.RemoteAddr, ro.Host)
-	xnet.Transport(conn, cc)
+	// xnet.Transport(conn, cc)
+	xnet.Pipe(ctx, conn, cc)
 	log.WithFields(map[string]any{
 		"duration": time.Since(ro.Time),
 	}).Infof("%s >-< %s", ro.RemoteAddr, ro.Host)

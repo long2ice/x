@@ -108,7 +108,9 @@ func (h *http2Handler) Handle(ctx context.Context, conn net.Conn, opts ...handle
 		Time:       start,
 		SID:        string(ctxvalue.SidFromContext(ctx)),
 	}
-	ro.ClientIP, _, _ = net.SplitHostPort(conn.RemoteAddr().String())
+	if srcAddr := ctxvalue.SrcAddrFromContext(ctx); srcAddr != nil {
+		ro.ClientIP = srcAddr.String()
+	}
 
 	log := h.options.Logger.WithFields(map[string]any{
 		"remote":  conn.RemoteAddr().String(),
@@ -315,16 +317,23 @@ func (h *http2Handler) roundTrip(ctx context.Context, w http.ResponseWriter, req
 
 		start := time.Now()
 		log.Infof("%s <-> %s", req.RemoteAddr, host)
-		xnet.Transport(rw, cc)
+		// xnet.Transport(rw, cc)
+		xnet.Pipe(ctx, xio.NewReadWriteCloser(rw, rw, req.Body), cc)
 		log.WithFields(map[string]any{
 			"duration": time.Since(start),
 		}).Infof("%s >-< %s", req.RemoteAddr, host)
 		return nil
 	}
 
-	// TODO: forward request
-	resp.StatusCode = http.StatusBadRequest
-	w.WriteHeader(resp.StatusCode)
+	start := time.Now()
+	log.Infof("%s <-> %s", req.RemoteAddr, host)
+	if err := h.forwardRequest(w, req, cc); err != nil {
+		log.Info("%s - %s: %s", req.RemoteAddr, host, err)
+	}
+	log.WithFields(map[string]any{
+		"duration": time.Since(start),
+	}).Infof("%s >-< %s", req.RemoteAddr, host)
+
 	return nil
 }
 
@@ -455,6 +464,7 @@ func (h *http2Handler) authenticate(ctx context.Context, w http.ResponseWriter, 
 
 	return
 }
+
 func (h *http2Handler) forwardRequest(w http.ResponseWriter, r *http.Request, rw io.ReadWriter) (err error) {
 	if err = r.Write(rw); err != nil {
 		return

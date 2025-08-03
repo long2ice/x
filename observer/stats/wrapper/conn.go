@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-gost/core/metadata"
 	"github.com/go-gost/core/observer/stats"
+	xio "github.com/go-gost/x/internal/io"
 	xnet "github.com/go-gost/x/internal/net"
 	"github.com/go-gost/x/internal/net/udp"
 )
@@ -80,6 +81,34 @@ func (c *conn) Metadata() metadata.Metadata {
 		return md.Metadata()
 	}
 	return nil
+}
+
+func (c *conn) SrcAddr() net.Addr {
+	if sc, ok := c.Conn.(xnet.SrcAddr); ok {
+		return sc.SrcAddr()
+	}
+	return nil
+}
+
+func (c *conn) DstAddr() net.Addr {
+	if sc, ok := c.Conn.(xnet.DstAddr); ok {
+		return sc.DstAddr()
+	}
+	return nil
+}
+
+func (c *conn) CloseRead() error {
+	if sc, ok := c.Conn.(xio.CloseRead); ok {
+		return sc.CloseRead()
+	}
+	return xio.ErrUnsupported
+}
+
+func (c *conn) CloseWrite() error {
+	if sc, ok := c.Conn.(xio.CloseWrite); ok {
+		return sc.CloseWrite()
+	}
+	return xio.ErrUnsupported
 }
 
 type packetConn struct {

@@ -7,6 +7,7 @@ import (
 
 	limiter "github.com/go-gost/core/limiter/conn"
 	"github.com/go-gost/core/metadata"
+	xio "github.com/go-gost/x/internal/io"
 )
 
 var (
@@ -48,4 +49,18 @@ func (c *serverConn) Metadata() metadata.Metadata {
 		return md.Metadata()
 	}
 	return nil
+}
+
+func (c *serverConn) CloseRead() error {
+	if sc, ok := c.Conn.(xio.CloseRead); ok {
+		return sc.CloseRead()
+	}
+	return xio.ErrUnsupported
+}
+
+func (c *serverConn) CloseWrite() error {
+	if sc, ok := c.Conn.(xio.CloseWrite); ok {
+		return sc.CloseWrite()
+	}
+	return xio.ErrUnsupported
 }

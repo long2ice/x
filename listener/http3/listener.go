@@ -9,6 +9,7 @@ import (
 	"github.com/go-gost/core/logger"
 	md "github.com/go-gost/core/metadata"
 	xnet "github.com/go-gost/x/internal/net"
+	xhttp "github.com/go-gost/x/internal/net/http"
 	mdx "github.com/go-gost/x/metadata"
 	"github.com/go-gost/x/registry"
 	"github.com/quic-go/quic-go"
@@ -124,16 +125,26 @@ func (l *http3Listener) Close() (err error) {
 }
 
 func (l *http3Listener) handleFunc(w http.ResponseWriter, r *http.Request) {
-	raddr, _ := net.ResolveTCPAddr("tcp", r.RemoteAddr)
+	remoteAddr, _ := net.ResolveTCPAddr("tcp", r.RemoteAddr)
+	if remoteAddr == nil {
+		remoteAddr = &net.TCPAddr{
+			IP: net.IPv4zero,
+		}
+	}
 	conn := &conn{
 		laddr:  l.addr,
-		raddr:  raddr,
+		raddr:  remoteAddr,
 		closed: make(chan struct{}),
 		md: mdx.NewMetadata(map[string]any{
 			"r": r,
 			"w": w,
 		}),
 	}
+
+	if clientIP := xhttp.GetClientIP(r); clientIP != nil {
+		conn.srcAddr = &net.UDPAddr{IP: clientIP}
+	}
+
 	select {
 	case l.cqueue <- conn:
 	default:
