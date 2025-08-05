@@ -12,6 +12,7 @@ import (
 	"github.com/go-gost/core/logger"
 	md "github.com/go-gost/core/metadata"
 	admission "github.com/go-gost/x/admission/wrapper"
+	xctx "github.com/go-gost/x/ctx"
 	xnet "github.com/go-gost/x/internal/net"
 	xhttp "github.com/go-gost/x/internal/net/http"
 	"github.com/go-gost/x/internal/net/proxyproto"
@@ -37,7 +38,7 @@ type wsListener struct {
 	tlsEnabled bool
 	cqueue     chan net.Conn
 	errChan    chan error
-	logger     logger.Logger
+	log        logger.Logger
 	md         metadata
 	options    listener.Options
 }
@@ -48,7 +49,7 @@ func NewListener(opts ...listener.Option) listener.Listener {
 		opt(&options)
 	}
 	return &wsListener{
-		logger:  options.Logger,
+		log:     options.Logger,
 		options: options,
 	}
 }
@@ -60,7 +61,7 @@ func NewTLSListener(opts ...listener.Option) listener.Listener {
 	}
 	return &wsListener{
 		tlsEnabled: true,
-		logger:     options.Logger,
+		log:        options.Logger,
 		options:    options,
 	}
 }
@@ -97,7 +98,7 @@ func (l *wsListener) Init(md md.Metadata) (err error) {
 	lc := net.ListenConfig{}
 	if l.md.mptcp {
 		lc.SetMultipathTCP(true)
-		l.logger.Debugf("mptcp enabled: %v", lc.MultipathTCP())
+		l.log.Debugf("mptcp enabled: %v", lc.MultipathTCP())
 	}
 	ln, err := lc.Listen(context.Background(), network, l.options.Addr)
 	if err != nil {
@@ -163,7 +164,7 @@ func (l *wsListener) upgrade(w http.ResponseWriter, r *http.Request) {
 	if clientIP != nil {
 		cip = clientIP.String()
 	}
-	log := l.logger.WithFields(map[string]any{
+	log := l.log.WithFields(map[string]any{
 		"local":  l.addr.String(),
 		"remote": r.RemoteAddr,
 		"client": cip,
@@ -179,13 +180,19 @@ func (l *wsListener) upgrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var srcAddr net.Addr
+	ctx := context.Background()
+	if cc, ok := conn.NetConn().(xctx.Context); ok {
+		if cv := cc.Context(); cv != nil {
+			ctx = cv
+		}
+	}
+
 	if clientIP != nil {
-		srcAddr = &net.TCPAddr{IP: clientIP}
+		ctx = xctx.ContextWithSrcAddr(ctx, &net.TCPAddr{IP: clientIP})
 	}
 
 	select {
-	case l.cqueue <- ws_util.ConnWithSrcAddr(conn, srcAddr):
+	case l.cqueue <- ws_util.ContextConn(ctx, conn):
 	default:
 		conn.Close()
 		log.Warnf("connection queue is full, client %s discarded", conn.RemoteAddr())
