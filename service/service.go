@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -230,14 +231,11 @@ func (s *defaultService) Serve() error {
 			ctx = xctx.ContextWithDstAddr(ctx, dstAddr)
 		}
 
-		// clientAddr := srcAddr.String()
-		// ctx = xctx.ContextWithClientAddr(ctx, xctx.ClientAddr(clientAddr))
-
 		clientIP := srcAddr.String()
 		if h, _, _ := net.SplitHostPort(clientIP); h != "" {
 			clientIP = h
 		}
-		// ctx = xctx.ContextWithHash(ctx, &xctx.Hash{Source: clientIP})
+		ctx = xctx.ContextWithHash(ctx, &xctx.Hash{Source: clientIP})
 
 		for _, rec := range s.options.recorders {
 			if rec.Record == recorder.RecorderServiceClientAddress {
@@ -329,8 +327,8 @@ func (s *defaultService) execCmd(cmd string) error {
 		return errors.New("invalid command")
 	}
 	c := exec.Command(ss[0], ss[1:]...)
-	// c.Stdout = os.Stdout
-	// c.Stderr = os.Stderr
+	c.Stdout = os.Stdout
+	c.Stderr = os.Stderr
 	return c.Run()
 }
 

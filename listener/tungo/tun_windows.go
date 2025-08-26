@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/go-gost/core/router"
 	"golang.org/x/sys/windows"
 	"golang.zx2c4.com/wireguard/tun"
 )
@@ -40,12 +41,16 @@ func (l *tunListener) createTun() (ifce io.ReadWriteCloser, name string, ip net.
 		return
 	}
 
-	if l.md.config.MTU > 0  {
+	if l.md.config.MTU > 0 {
 		cmd := fmt.Sprintf("netsh interface ip set subinterface %s mtu=%d", name, l.md.config.MTU)
 		l.log.Debug(cmd)
 
 		args := strings.Split(cmd, " ")
-		if er := exec.Command(args[0], args[1:]...).Run(); er != nil {
+		output, er := exec.Command(args[0], args[1:]...).CombinedOutput()
+		if len(output) > 0 {
+			l.log.Debugf("%s: %s", cmd, windows.ByteSliceToString(output))
+		}
+		if er != nil {
 			err = fmt.Errorf("%s: %v", cmd, er)
 			return
 		}
@@ -56,10 +61,18 @@ func (l *tunListener) createTun() (ifce io.ReadWriteCloser, name string, ip net.
 		cmd := fmt.Sprintf("netsh interface ip set address name=%s "+
 			"source=static addr=%s mask=%s",
 			name, ipNet.IP.String(), ipMask(ipNet.Mask))
+		if ipNet.IP.To4() == nil { // ipv6
+			cmd = fmt.Sprintf("netsh interface ipv6 set address %s %s",
+				name, ipNet.IP.String())
+		}
 		l.log.Debug(cmd)
 
 		args := strings.Split(cmd, " ")
-		if er := exec.Command(args[0], args[1:]...).Run(); er != nil {
+		output, er := exec.Command(args[0], args[1:]...).CombinedOutput()
+		if len(output) > 0 {
+			l.log.Debugf("%s: %s", cmd, windows.ByteSliceToString(output))
+		}
+		if er != nil {
 			err = fmt.Errorf("%s: %v", cmd, er)
 			return
 		}
@@ -71,11 +84,19 @@ func (l *tunListener) createTun() (ifce io.ReadWriteCloser, name string, ip net.
 	}
 
 	for _, dns := range l.md.config.DNS {
-		cmd := fmt.Sprintf("netsh interface ip add dnsservers name=%s address=%s validate=no", name, dns.String())
+		network := "ip"
+		if dns.To4() == nil {
+			network = "ipv6"
+		}
+		cmd := fmt.Sprintf("netsh interface %s add dnsservers name=%s address=%s validate=no", network, name, dns.String())
 		l.log.Debug(cmd)
 
 		args := strings.Split(cmd, " ")
-		if er := exec.Command(args[0], args[1:]...).Run(); er != nil {
+		output, er := exec.Command(args[0], args[1:]...).CombinedOutput()
+		if len(output) > 0 {
+			l.log.Debugf("%s: %s", cmd, windows.ByteSliceToString(output))
+		}
+		if er != nil {
 			err = fmt.Errorf("%s: %v", cmd, er)
 			return
 		}
@@ -86,28 +107,51 @@ func (l *tunListener) createTun() (ifce io.ReadWriteCloser, name string, ip net.
 
 func (l *tunListener) addRoutes(ifName string, gw net.IP) error {
 	for _, route := range l.routes {
-		l.deleteRoute(ifName, route.Net.String())
+		l.deleteRoute(ifName, route)
 
-		cmd := fmt.Sprintf("netsh interface ip add route prefix=%s interface=%s store=active",
-			route.Net.String(), ifName)
+		network := "ip"
+		if route.Net.IP.To4() == nil {
+			network = "ipv6"
+		}
+		cmd := fmt.Sprintf("netsh interface %s add route prefix=%s interface=%s store=active",
+			network, route.Net.String(), ifName)
 		if gw != nil {
 			cmd += " nexthop=" + gw.String()
 		}
 		l.log.Debug(cmd)
 		args := strings.Split(cmd, " ")
-		if er := exec.Command(args[0], args[1:]...).Run(); er != nil {
+		output, er := exec.Command(args[0], args[1:]...).CombinedOutput()
+		if len(output) > 0 {
+			l.log.Debugf("%s: %s", cmd, windows.ByteSliceToString(output))
+		}
+		if er != nil {
 			return fmt.Errorf("%s: %v", cmd, er)
 		}
 	}
 	return nil
 }
 
-func (l *tunListener) deleteRoute(ifName string, route string) error {
-	cmd := fmt.Sprintf("netsh interface ip delete route prefix=%s interface=%s store=active",
-		route, ifName)
+func (l *tunListener) deleteRoute(ifName string, route *router.Route) error {
+	if ifName == "" || route == nil {
+		return nil
+	}
+
+	network := "ip"
+	if route.Net.IP.To4() == nil {
+		network = "ipv6"
+	}
+	cmd := fmt.Sprintf("netsh interface %s delete route prefix=%s interface=%s store=active",
+		network, route.Net.String(), ifName)
 	l.log.Debug(cmd)
 	args := strings.Split(cmd, " ")
-	return exec.Command(args[0], args[1:]...).Run()
+	output, er := exec.Command(args[0], args[1:]...).CombinedOutput()
+	if len(output) > 0 {
+		l.log.Debugf("%s: %s", cmd, windows.ByteSliceToString(output))
+	}
+	if er != nil {
+		return fmt.Errorf("%s: %v", cmd, er)
+	}
+	return nil
 }
 
 func ipMask(mask net.IPMask) string {
