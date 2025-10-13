@@ -9,7 +9,9 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/go-gost/core/auth"
 	"github.com/go-gost/core/handler"
+	"github.com/go-gost/core/ingress"
 	"github.com/go-gost/core/limiter"
 	"github.com/go-gost/core/limiter/traffic"
 	"github.com/go-gost/core/listener"
@@ -44,16 +46,15 @@ func init() {
 }
 
 type tunnelHandler struct {
-	id      string
-	options handler.Options
-	pool    *ConnectorPool
-	epSvc   service.Service
-	ep      *entrypoint
-	md      metadata
-	log     logger.Logger
-	stats   *stats_util.HandlerStats
-	limiter traffic.TrafficLimiter
-	cancel  context.CancelFunc
+	id          string
+	options     handler.Options
+	pool        *ConnectorPool
+	entrypoints []service.Service
+	md          metadata
+	log         logger.Logger
+	stats       *stats_util.HandlerStats
+	limiter     traffic.TrafficLimiter
+	cancel      context.CancelFunc
 }
 
 func NewHandler(opts ...handler.Option) handler.Handler {
@@ -83,34 +84,7 @@ func (h *tunnelHandler) Init(md md.Metadata) (err error) {
 	})
 	h.pool = NewConnectorPool(h.id)
 
-	h.ep = &entrypoint{
-		node:    h.id,
-		service: h.options.Service,
-		pool:    h.pool,
-		ingress: h.md.ingress,
-		sd:      h.md.sd,
-		log: h.log.WithFields(map[string]any{
-			"kind": "entrypoint",
-		}),
-		sniffingWebsocket:   h.md.sniffingWebsocket,
-		websocketSampleRate: h.md.sniffingWebsocketSampleRate,
-		readTimeout:         h.md.entryPointReadTimeout,
-	}
-	h.ep.transport = &http.Transport{
-		DialContext:           h.ep.dial,
-		IdleConnTimeout:       30 * time.Second,
-		ResponseHeaderTimeout: h.md.entryPointReadTimeout,
-		DisableKeepAlives:     !h.md.entryPointKeepalive,
-		DisableCompression:    !h.md.entryPointCompression,
-	}
-
-	for _, ro := range h.options.Recorders {
-		if ro.Record == xrecorder.RecorderServiceHandler {
-			h.ep.recorder = ro
-			break
-		}
-	}
-	if err = h.initEntrypoint(); err != nil {
+	if err = h.initEntrypoints(); err != nil {
 		return
 	}
 
@@ -133,20 +107,73 @@ func (h *tunnelHandler) Init(md md.Metadata) (err error) {
 	return nil
 }
 
-func (h *tunnelHandler) initEntrypoint() (err error) {
-	if h.md.entryPoint == "" {
-		return
+func (h *tunnelHandler) initEntrypoints() (err error) {
+	if h.md.entryPoint != "" {
+		svc, err := h.createEntrypointService(h.md.entryPoint, h.md.ingress)
+		if err != nil {
+			return err
+		}
+		go svc.Serve()
+
+		h.entrypoints = append(h.entrypoints, svc)
+		h.log.Infof("entrypoint: %s", svc.Addr())
+	}
+
+	for _, ep := range h.md.entrypoints {
+		if ep.Addr == "" {
+			continue
+		}
+		svc, err := h.createEntrypointService(ep.Addr, ep.Ingress)
+		if err != nil {
+			return err
+		}
+		go svc.Serve()
+
+		h.entrypoints = append(h.entrypoints, svc)
+		h.log.Infof("entrypoint: %s %s", ep.Name, svc.Addr())
+	}
+
+	return
+}
+
+func (h *tunnelHandler) createEntrypointService(addr string, ingress ingress.Ingress) (service.Service, error) {
+	ep := &entrypoint{
+		node:    h.id,
+		service: h.options.Service,
+		pool:    h.pool,
+		ingress: ingress,
+		sd:      h.md.sd,
+		log: h.log.WithFields(map[string]any{
+			"kind": "entrypoint",
+		}),
+		sniffingWebsocket:   h.md.sniffingWebsocket,
+		websocketSampleRate: h.md.sniffingWebsocketSampleRate,
+		readTimeout:         h.md.entryPointReadTimeout,
+	}
+	ep.transport = &http.Transport{
+		DialContext:           ep.dial,
+		IdleConnTimeout:       30 * time.Second,
+		ResponseHeaderTimeout: h.md.entryPointReadTimeout,
+		DisableKeepAlives:     !h.md.entryPointKeepalive,
+		DisableCompression:    !h.md.entryPointCompression,
+	}
+
+	for _, ro := range h.options.Recorders {
+		if ro.Record == xrecorder.RecorderServiceHandler {
+			ep.recorder = ro
+			break
+		}
 	}
 
 	network := "tcp"
-	if xnet.IsIPv4(h.md.entryPoint) {
+	if xnet.IsIPv4(addr) {
 		network = "tcp4"
 	}
 
-	ln, err := net.Listen(network, h.md.entryPoint)
+	ln, err := net.Listen(network, addr)
 	if err != nil {
 		h.log.Error(err)
-		return
+		return nil, err
 	}
 
 	serviceName := fmt.Sprintf("%s-ep-%s", h.options.Service, ln.Addr())
@@ -157,7 +184,7 @@ func (h *tunnelHandler) initEntrypoint() (err error) {
 		"kind":     "service",
 	})
 	epListener := newTCPListener(ln,
-		listener.AddrOption(h.md.entryPoint),
+		listener.AddrOption(addr),
 		listener.ServiceOption(serviceName),
 		listener.ProxyProtocolOption(h.md.entryPointProxyProtocol),
 		listener.LoggerOption(log.WithFields(map[string]any{
@@ -165,23 +192,19 @@ func (h *tunnelHandler) initEntrypoint() (err error) {
 		})),
 	)
 	if err = epListener.Init(nil); err != nil {
-		return
+		return nil, err
 	}
 	epHandler := &entrypointHandler{
-		ep: h.ep,
+		ep: ep,
 	}
 	if err = epHandler.Init(nil); err != nil {
-		return
+		return nil, err
 	}
 
-	h.epSvc = xservice.NewService(
+	return xservice.NewService(
 		serviceName, epListener, epHandler,
 		xservice.LoggerOption(log),
-	)
-	go h.epSvc.Serve()
-	log.Infof("entrypoint: %s", h.epSvc.Addr())
-
-	return
+	), nil
 }
 
 func (h *tunnelHandler) Handle(ctx context.Context, conn net.Conn, opts ...handler.HandleOption) (err error) {
@@ -277,7 +300,7 @@ func (h *tunnelHandler) Handle(ctx context.Context, conn net.Conn, opts ...handl
 	}
 
 	if h.options.Auther != nil {
-		clientID, ok := h.options.Auther.Authenticate(ctx, user, pass)
+		clientID, ok := h.options.Auther.Authenticate(ctx, user, pass, auth.WithService(h.options.Service))
 		if !ok {
 			resp.Status = relay.StatusUnauthorized
 			resp.WriteTo(conn)
@@ -305,8 +328,8 @@ func (h *tunnelHandler) Handle(ctx context.Context, conn net.Conn, opts ...handl
 
 // Close implements io.Closer interface.
 func (h *tunnelHandler) Close() error {
-	if h.epSvc != nil {
-		h.epSvc.Close()
+	for _, ep := range h.entrypoints {
+		ep.Close()
 	}
 	h.pool.Close()
 

@@ -9,10 +9,10 @@ require (
 	github.com/asaskevich/govalidator v0.0.0-20210307081110-f21760c49a8d
 	github.com/gin-contrib/cors v1.7.2
 	github.com/gin-gonic/gin v1.10.1
-	github.com/go-gost/core v0.3.2
+	github.com/go-gost/core v0.3.3
 	github.com/go-gost/gosocks4 v0.0.1
 	github.com/go-gost/gosocks5 v0.4.2
-	github.com/go-gost/plugin v0.2.0
+	github.com/go-gost/plugin v0.2.1
 	github.com/go-gost/relay v0.5.0
 	github.com/go-gost/tls-dissector v0.1.1
 	github.com/go-redis/redis/v8 v8.11.5
@@ -27,7 +27,7 @@ require (
 	github.com/pion/dtls/v2 v2.2.6
 	github.com/pires/go-proxyproto v0.8.1
 	github.com/prometheus/client_golang v1.19.1
-	github.com/quic-go/quic-go v0.53.0
+	github.com/quic-go/quic-go v0.54.1
 	github.com/quic-go/webtransport-go v0.9.0
 	github.com/rs/xid v1.3.0
 	github.com/shadowsocks/go-shadowsocks2 v0.1.6-0.20241020092332-e1fe9ea73740
