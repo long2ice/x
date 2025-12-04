@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/go-gost/core/chain"
@@ -18,13 +19,30 @@ import (
 	xmetrics "github.com/go-gost/x/metrics"
 )
 
-var (
-	ErrEmptyRoute = errors.New("empty route")
-)
+type nodeConn struct {
+	net.Conn
+	nodes  []*chain.Node
+	closed bool
+	mu     sync.Mutex
+}
 
-var (
-	DefaultRoute chain.Route = &defaultRoute{}
-)
+func (c *nodeConn) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.closed {
+		return nil
+	}
+	c.closed = true
+	for _, node := range c.nodes {
+		node.DecActiveConns()
+	}
+	return c.Conn.Close()
+}
+
+var ErrEmptyRoute = errors.New("empty route")
+
+var DefaultRoute chain.Route = &defaultRoute{}
 
 // defaultRoute is a Route without nodes.
 type defaultRoute struct{}
@@ -247,6 +265,10 @@ func (r *chainRoute) connect(ctx context.Context, logger logger.Logger) (conn ne
 		marker.Reset()
 	}
 
+	latency := time.Since(start)
+	node.SetLatency(latency)
+	node.IncActiveConns()
+
 	if r.options.Chain != nil {
 		var name string
 		if cn, _ := r.options.Chain.(chainNamer); cn != nil {
@@ -254,7 +276,7 @@ func (r *chainRoute) connect(ctx context.Context, logger logger.Logger) (conn ne
 		}
 		if v := xmetrics.GetObserver(xmetrics.MetricNodeConnectDurationObserver,
 			metrics.Labels{"chain": name, "node": node.Name}); v != nil {
-			v.Observe(time.Since(start).Seconds())
+			v.Observe(latency.Seconds())
 		}
 	}
 
@@ -269,6 +291,7 @@ func (r *chainRoute) connect(ctx context.Context, logger logger.Logger) (conn ne
 			}
 			return
 		}
+		start := time.Now()
 		cc, err = preNode.Options().Transport.Connect(ctx, cn, "tcp", addr)
 		if err != nil {
 			cn.Close()
@@ -289,11 +312,17 @@ func (r *chainRoute) connect(ctx context.Context, logger logger.Logger) (conn ne
 			marker.Reset()
 		}
 
+		node.SetLatency(time.Since(start))
+		node.IncActiveConns()
+
 		cn = cc
 		preNode = node
 	}
 
-	conn = cn
+	conn = &nodeConn{
+		Conn:  cn,
+		nodes: r.nodes,
+	}
 	return
 }
 
