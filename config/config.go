@@ -10,9 +10,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-var (
-	v = viper.GetViper()
-)
+var v = viper.GetViper()
 
 func init() {
 	v.SetConfigName("gost")
@@ -152,6 +150,13 @@ type SelectorConfig struct {
 	Strategy    string        `json:"strategy"`
 	MaxFails    int           `yaml:"maxFails" json:"maxFails"`
 	FailTimeout time.Duration `yaml:"failTimeout" json:"failTimeout"`
+
+	HealthCheck        bool          `yaml:"healthCheck" json:"healthCheck"`
+	HealthCheckType    string        `yaml:"healthCheckType" json:"healthCheckType"`
+	HealthInterval     time.Duration `yaml:"healthInterval" json:"healthInterval"`
+	HealthTimeout      time.Duration `yaml:"healthTimeout" json:"healthTimeout"`
+	HealthPath         string        `yaml:"healthPath" json:"healthPath"`
+	HealthExpectStatus int           `yaml:"healthExpectStatus" json:"healthExpectStatus"`
 }
 
 type AdmissionConfig struct {

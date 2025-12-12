@@ -23,15 +23,21 @@ import (
 )
 
 type options struct {
-	name        string
-	nodes       []*chain.Node
-	bypass      bypass.Bypass
-	selector    selector.Selector[*chain.Node]
-	fileLoader  loader.Loader
-	redisLoader loader.Loader
-	httpLoader  loader.Loader
-	period      time.Duration
-	logger      logger.Logger
+	name          string
+	nodes         []*chain.Node
+	bypass        bypass.Bypass
+	selector      selector.Selector[*chain.Node]
+	healthChecker HealthChecker
+	fileLoader    loader.Loader
+	redisLoader   loader.Loader
+	httpLoader    loader.Loader
+	period        time.Duration
+	logger        logger.Logger
+}
+
+type HealthChecker interface {
+	Start(nodes []any)
+	Stop()
 }
 
 type Option func(*options)
@@ -47,6 +53,7 @@ func NodeOption(nodes ...*chain.Node) Option {
 		o.nodes = nodes
 	}
 }
+
 func BypassOption(bp bypass.Bypass) Option {
 	return func(o *options) {
 		o.bypass = bp
@@ -56,6 +63,12 @@ func BypassOption(bp bypass.Bypass) Option {
 func SelectorOption(s selector.Selector[*chain.Node]) Option {
 	return func(o *options) {
 		o.selector = s
+	}
+}
+
+func HealthCheckerOption(hc HealthChecker) Option {
+	return func(o *options) {
+		o.healthChecker = hc
 	}
 }
 
@@ -82,6 +95,7 @@ func HTTPLoaderOption(httpLoader loader.Loader) Option {
 		opts.httpLoader = httpLoader
 	}
 }
+
 func LoggerOption(logger logger.Logger) Option {
 	return func(opts *options) {
 		opts.logger = logger
@@ -89,11 +103,12 @@ func LoggerOption(logger logger.Logger) Option {
 }
 
 type chainHop struct {
-	nodes      []*chain.Node
-	options    options
-	logger     logger.Logger
-	mu         sync.RWMutex
-	cancelFunc context.CancelFunc
+	nodes         []*chain.Node
+	options       options
+	logger        logger.Logger
+	mu            sync.RWMutex
+	cancelFunc    context.CancelFunc
+	healthChecker HealthChecker
 }
 
 func NewHop(opts ...Option) hop.Hop {
@@ -106,10 +121,11 @@ func NewHop(opts ...Option) hop.Hop {
 
 	ctx, cancel := context.WithCancel(context.TODO())
 	p := &chainHop{
-		nodes:      options.nodes,
-		cancelFunc: cancel,
-		options:    options,
-		logger:     options.logger,
+		nodes:         options.nodes,
+		cancelFunc:    cancel,
+		options:       options,
+		logger:        options.logger,
+		healthChecker: options.healthChecker,
 	}
 
 	if p.logger == nil {
@@ -117,6 +133,7 @@ func NewHop(opts ...Option) hop.Hop {
 	}
 
 	go p.periodReload(ctx)
+	p.startHealthCheck()
 
 	return p
 }
@@ -180,6 +197,14 @@ func (p *chainHop) Select(ctx context.Context, opts ...hop.SelectOption) *chain.
 	if len(nodes) == 0 {
 		return nil
 	}
+
+	if s := p.options.selector; s != nil {
+		selected := s.Select(ctx, nodes...)
+		if selected != nil {
+			return selected
+		}
+	}
+
 	if len(nodes) == 1 {
 		return nodes[0]
 	}
@@ -192,9 +217,6 @@ func (p *chainHop) Select(ctx context.Context, opts ...hop.SelectOption) *chain.
 		return nodes[0]
 	}
 
-	if s := p.options.selector; s != nil {
-		return s.Select(ctx, nodes...)
-	}
 	return nodes[0]
 }
 
@@ -363,8 +385,26 @@ func (p *chainHop) parseNode(r io.Reader) ([]*chain.Node, error) {
 	return nodes, nil
 }
 
+func (p *chainHop) startHealthCheck() {
+	if p.healthChecker == nil {
+		return
+	}
+	nodes := p.Nodes()
+	if len(nodes) == 0 {
+		return
+	}
+	anyNodes := make([]any, len(nodes))
+	for i, n := range nodes {
+		anyNodes[i] = n
+	}
+	p.healthChecker.Start(anyNodes)
+}
+
 func (p *chainHop) Close() error {
 	p.cancelFunc()
+	if p.healthChecker != nil {
+		p.healthChecker.Stop()
+	}
 	if p.options.fileLoader != nil {
 		p.options.fileLoader.Close()
 	}

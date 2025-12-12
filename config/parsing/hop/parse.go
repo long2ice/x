@@ -153,16 +153,22 @@ func ParseHop(cfg *config.HopConfig, log logger.Logger) (hop.Hop, error) {
 		sel = selector_parser.DefaultNodeSelector()
 	}
 
+	hopLogger := log.WithFields(map[string]any{
+		"kind": "hop",
+		"hop":  cfg.Name,
+	})
+
 	opts := []xhop.Option{
 		xhop.NameOption(cfg.Name),
 		xhop.NodeOption(nodes...),
 		xhop.SelectorOption(sel),
 		xhop.BypassOption(xbypass.BypassGroup(bypass_parser.List(cfg.Bypass, cfg.Bypasses...)...)),
 		xhop.ReloadPeriodOption(cfg.Reload),
-		xhop.LoggerOption(log.WithFields(map[string]any{
-			"kind": "hop",
-			"hop":  cfg.Name,
-		})),
+		xhop.LoggerOption(hopLogger),
+	}
+
+	if hc := selector_parser.ParseHealthChecker(cfg.Selector, hopLogger); hc != nil {
+		opts = append(opts, xhop.HealthCheckerOption(hc))
 	}
 
 	if cfg.File != nil && cfg.File.Path != "" {
