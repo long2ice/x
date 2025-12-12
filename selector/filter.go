@@ -5,8 +5,8 @@ import (
 	"time"
 
 	"github.com/go-gost/core/metadata"
-	mdutil "github.com/go-gost/x/metadata/util"
 	"github.com/go-gost/core/selector"
+	mdutil "github.com/go-gost/x/metadata/util"
 )
 
 type failFilter[T any] struct {
@@ -59,6 +59,42 @@ func (f *failFilter[T]) Filter(ctx context.Context, vs ...T) []T {
 			}
 		}
 		l = append(l, v)
+	}
+	return l
+}
+
+type healthCheckFilter[T any] struct {
+	maxFails int
+}
+
+func HealthCheckFilter[T any](maxFails int) selector.Filter[T] {
+	return &healthCheckFilter[T]{
+		maxFails: maxFails,
+	}
+}
+
+func (f *healthCheckFilter[T]) Filter(ctx context.Context, vs ...T) []T {
+	if len(vs) <= 1 {
+		return vs
+	}
+	maxFails := f.maxFails
+	if maxFails <= 0 {
+		maxFails = 1
+	}
+	var l []T
+	for _, v := range vs {
+		if mi, _ := any(v).(selector.Markable); mi != nil {
+			if marker := mi.Marker(); marker != nil {
+				if marker.Count() < int64(maxFails) {
+					l = append(l, v)
+				}
+				continue
+			}
+		}
+		l = append(l, v)
+	}
+	if len(l) == 0 {
+		return vs
 	}
 	return l
 }
