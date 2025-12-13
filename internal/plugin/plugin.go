@@ -90,6 +90,7 @@ func NewHTTPClient(opts *Options) *http.Client {
 		Timeout: opts.Timeout,
 		Transport: &http.Transport{
 			TLSClientConfig: opts.TLSConfig,
+			Proxy:           http.ProxyFromEnvironment,
 		},
 	}
 }
