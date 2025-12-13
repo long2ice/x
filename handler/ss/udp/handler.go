@@ -258,7 +258,20 @@ func (h *ssuHandler) relayPacketUDP(ctx context.Context, src net.PacketConn, ro 
 			return err
 		}
 
-		targetAddr, err := net.ResolveUDPAddr("udp", session.Target().String())
+		var targetAddr *net.UDPAddr
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					targetAddr = nil
+				}
+			}()
+			targetAddr, err = net.ResolveUDPAddr("udp", session.Target().String())
+		}()
+
+		if targetAddr == nil || err != nil {
+			return err
+		}
+
 		if ro.Host == "" {
 			ro.Host = targetAddr.String()
 		}
