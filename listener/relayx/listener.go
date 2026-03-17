@@ -57,11 +57,12 @@ type relayxListener struct {
 
 	authKey []byte
 
-	replayMu      sync.Mutex
-	replayLastSec int64
-	replayWindow  int64
-	replayIndex   map[[24]byte]int64
-	replayBuckets []map[[24]byte]struct{}
+	replayMu         sync.Mutex
+	replayLastSec    int64
+	replayWindow     int64
+	replayMaxEntries int
+	replayIndex      map[[24]byte]int64
+	replayBuckets    []map[[24]byte]struct{}
 }
 
 func NewListener(opts ...listener.Option) listener.Listener {
@@ -192,7 +193,7 @@ func (l *relayxListener) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := rw.WriteString("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nCache-Control: no-store\r\nServer: nginx/1.24.0\r\n\r\n"); err != nil {
+	if _, err := rw.WriteString("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nCache-Control: no-store\r\nServer: nginx/1.27.4\r\n\r\n"); err != nil {
 		conn.Close()
 		return
 	}
@@ -281,6 +282,9 @@ func (l *relayxListener) rememberToken(tokenID []byte, expiresAt int64) bool {
 	if _, ok := l.replayIndex[key]; ok {
 		return false
 	}
+	if l.replayMaxEntries > 0 && len(l.replayIndex) >= l.replayMaxEntries {
+		return false
+	}
 	if expiresAt <= now {
 		expiresAt = now + l.replayWindow
 	}
@@ -301,6 +305,10 @@ func (l *relayxListener) initReplayCache() {
 		window = 300
 	}
 	l.replayWindow = window
+	l.replayMaxEntries = l.md.maxReplayEntries
+	if l.replayMaxEntries <= 0 {
+		l.replayMaxEntries = 100000
+	}
 	l.replayIndex = make(map[[24]byte]int64)
 	l.replayBuckets = make([]map[[24]byte]struct{}, window+1)
 	l.replayLastSec = time.Now().Unix()
@@ -335,7 +343,7 @@ func (l *relayxListener) serveDecoy(w http.ResponseWriter) {
 		body = defaultDecoyHTML
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Server", "nginx/1.24.0")
+	w.Header().Set("Server", "nginx/1.27.4")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(body))
 }

@@ -17,10 +17,11 @@ type metadata struct {
 	path      string
 	decoyBody string
 
-	backlog        int
-	readTimeout    time.Duration
-	replayWindow   time.Duration
-	maxHeaderBytes int
+	backlog         int
+	readTimeout     time.Duration
+	replayWindow    time.Duration
+	maxReplayEntries int
+	maxHeaderBytes  int
 }
 
 func (l *relayxListener) parseMetadata(md mdata.Metadata) error {
@@ -42,6 +43,8 @@ func (l *relayxListener) parseMetadata(md mdata.Metadata) error {
 	if l.md.replayWindow <= 0 {
 		l.md.replayWindow = 5 * time.Minute
 	}
+
+	l.md.maxReplayEntries = mdutil.GetInt(md, "maxReplayEntries")
 
 	l.md.maxHeaderBytes = mdutil.GetInt(md, "maxHeaderBytes")
 	if l.md.maxHeaderBytes <= 0 {

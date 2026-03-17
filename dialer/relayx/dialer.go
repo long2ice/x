@@ -6,11 +6,11 @@ import (
 	"crypto/hmac"
 	crand "crypto/rand"
 	"crypto/sha256"
-	"crypto/tls"
 	"encoding/base64"
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/url"
@@ -22,6 +22,7 @@ import (
 	xctx "github.com/go-gost/x/ctx"
 	"github.com/go-gost/x/internal/net/proxyproto"
 	"github.com/go-gost/x/registry"
+	utls "github.com/refraction-networking/utls"
 	"golang.org/x/crypto/hkdf"
 )
 
@@ -84,7 +85,14 @@ func (d *relayxDialer) Handshake(ctx context.Context, conn net.Conn, opts ...dia
 		defer conn.SetDeadline(time.Time{})
 	}
 
-	tlsConn := tls.Client(conn, d.options.TLSConfig)
+	uTLSConfig := &utls.Config{}
+	if tlsCfg := d.options.TLSConfig; tlsCfg != nil {
+		uTLSConfig.ServerName = tlsCfg.ServerName
+		uTLSConfig.InsecureSkipVerify = tlsCfg.InsecureSkipVerify
+		uTLSConfig.RootCAs = tlsCfg.RootCAs
+		uTLSConfig.NextProtos = tlsCfg.NextProtos
+	}
+	tlsConn := utls.UClient(conn, uTLSConfig, utls.HelloChrome_Auto)
 	if err := tlsConn.HandshakeContext(ctx); err != nil {
 		conn.Close()
 		return nil, err
@@ -106,19 +114,24 @@ func (d *relayxDialer) Handshake(ctx context.Context, conn net.Conn, opts ...dia
 	}
 
 	req := &http.Request{
-		Method:        http.MethodPost,
-		URL:           &url.URL{Scheme: "https", Host: host, Path: d.randomPath()},
-		Host:          host,
-		ProtoMajor:    1,
-		ProtoMinor:    1,
-		Header:        make(http.Header),
-		ContentLength: -1,
+		Method:     http.MethodPost,
+		URL:        &url.URL{Scheme: "https", Host: host, Path: d.randomPath()},
+		Host:       host,
+		ProtoMajor: 1,
+		ProtoMinor: 1,
+		Header:     make(http.Header),
+		Body:       http.NoBody,
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("User-Agent", d.randomUserAgent())
 	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
 	req.Header.Set("Connection", "keep-alive")
+	req.Header.Set("Sec-Fetch-Dest", "empty")
+	req.Header.Set("Sec-Fetch-Mode", "cors")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
 
 	if err := req.Write(tlsConn); err != nil {
 		tlsConn.Close()
@@ -214,11 +227,7 @@ func randomIndex(n int) int {
 	if n <= 1 {
 		return 0
 	}
-	var b [1]byte
-	if _, err := crand.Read(b[:]); err != nil {
-		return 0
-	}
-	return int(b[0]) % n
+	return rand.IntN(n)
 }
 
 var defaultPaths = []string{
@@ -233,9 +242,21 @@ var defaultPaths = []string{
 }
 
 var defaultUserAgents = []string{
+	// Chrome
 	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
-	"Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
+	"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
 	"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
+	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+	"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+	// Edge
+	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36 Edg/137.0.0.0",
+	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36 Edg/136.0.0.0",
+	// Firefox
+	"Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:138.0) Gecko/20100101 Firefox/138.0",
+	"Mozilla/5.0 (Macintosh; Intel Mac OS X 14.5; rv:138.0) Gecko/20100101 Firefox/138.0",
+	"Mozilla/5.0 (X11; Linux x86_64; rv:138.0) Gecko/20100101 Firefox/138.0",
+	// Safari
+	"Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.4 Safari/605.1.15",
 }
 
 var dialerBufReaderPool = sync.Pool{
