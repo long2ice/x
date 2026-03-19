@@ -259,6 +259,10 @@ func (h *ssuHandler) relayPacketUDP(ctx context.Context, src net.PacketConn, ro 
 		}
 
 		targetAddr, err := net.ResolveUDPAddr("udp", session.Target().String())
+		if err != nil {
+			log.Warnf("invalid target address from %s: %v", addr, err)
+			continue
+		}
 		if ro.Host == "" {
 			ro.Host = targetAddr.String()
 		}
@@ -266,9 +270,6 @@ func (h *ssuHandler) relayPacketUDP(ctx context.Context, src net.PacketConn, ro 
 		if h.options.Bypass != nil && h.options.Bypass.Contains(ctx, targetAddr.Network(), targetAddr.String(), bypass.WithService(h.options.Service)) {
 			log.Warn("bypass: ", addr)
 			return nil
-		}
-		if err != nil {
-			return err
 		}
 
 		dstConn, ok := h.connMap.Load(session.Hash())

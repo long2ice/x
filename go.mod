@@ -30,6 +30,7 @@ require (
 	github.com/prometheus/client_golang v1.23.2
 	github.com/quic-go/quic-go v0.57.1
 	github.com/quic-go/webtransport-go v0.9.0
+	github.com/refraction-networking/utls v1.8.2
 	github.com/rs/xid v1.6.0
 	github.com/shadowsocks/go-shadowsocks2 v0.1.5
 	github.com/sirupsen/logrus v1.9.3
@@ -105,7 +106,6 @@ require (
 	github.com/prometheus/common v0.67.4 // indirect
 	github.com/prometheus/procfs v0.19.2 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
-	github.com/refraction-networking/utls v1.8.2 // indirect
 	github.com/riobard/go-bloom v0.0.0-20200614022211-cdc8013cb5b3 // indirect
 	github.com/sagikazarmark/locafero v0.12.0 // indirect
 	github.com/spf13/afero v1.15.0 // indirect
@@ -130,3 +130,5 @@ require (
 replace github.com/ugorji/go v1.1.4 => github.com/ugorji/go/codec v1.2.12
 
 replace github.com/go-gost/core => github.com/long2ice/core v0.0.0-20251204121945-3894c0a44d61
+
+replace github.com/go-gost/go-shadowsocks2 => github.com/long2ice/go-shadowsocks2 v0.0.0-20260319114927-cff20912f60a
