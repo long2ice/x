@@ -29,6 +29,7 @@ import (
 	logger_parser "github.com/go-gost/x/config/parsing/logger"
 	selector_parser "github.com/go-gost/x/config/parsing/selector"
 	tls_util "github.com/go-gost/x/internal/util/tls"
+	climiter "github.com/go-gost/x/limiter/conn/wrapper"
 	cache_limiter "github.com/go-gost/x/limiter/traffic/cache"
 	"github.com/go-gost/x/metadata"
 	mdutil "github.com/go-gost/x/metadata/util"
@@ -108,6 +109,8 @@ func ParseService(cfg *config.ServiceConfig) (service.Service, error) {
 	var netnsIn, netnsOut string
 	var dialTimeout time.Duration
 
+	var maxClients int
+
 	var limiterRefreshInterval time.Duration
 	var limiterCleanupInterval time.Duration
 	var limiterScope string
@@ -139,6 +142,8 @@ func ParseService(cfg *config.ServiceConfig) (service.Service, error) {
 
 		dialTimeout = mdutil.GetDuration(md, parsing.MDKeyDialTimeout)
 
+		maxClients = mdutil.GetInt(md, parsing.MDKeyMaxClients)
+
 		limiterRefreshInterval = mdutil.GetDuration(md, parsing.MDKeyLimiterRefreshInterval)
 		limiterCleanupInterval = mdutil.GetDuration(md, parsing.MDKeyLimiterCleanupInterval)
 		limiterScope = mdutil.GetString(md, parsing.MDKeyLimiterScope)
@@ -163,6 +168,8 @@ func ParseService(cfg *config.ServiceConfig) (service.Service, error) {
 		)
 	}
 
+	connLimiter := climiter.NewIPCountConnLimiter(registry.ConnLimiterRegistry().Get(cfg.CLimiter), maxClients)
+
 	listenOpts := []listener.Option{
 		listener.AddrOption(cfg.Addr),
 		listener.RouterOption(xchain.NewRouter(routerOpts...)),
@@ -178,7 +185,7 @@ func ParseService(cfg *config.ServiceConfig) (service.Service, error) {
 				cache_limiter.ScopeOption(limiterScope),
 			),
 		),
-		listener.ConnLimiterOption(registry.ConnLimiterRegistry().Get(cfg.CLimiter)),
+		listener.ConnLimiterOption(connLimiter),
 		listener.ServiceOption(cfg.Name),
 		listener.ProxyProtocolOption(ppv),
 		listener.StatsOption(pStats),
@@ -329,7 +336,7 @@ func ParseService(cfg *config.ServiceConfig) (service.Service, error) {
 		return nil, err
 	}
 
-	s := xservice.NewService(cfg.Name, ln, h,
+	serviceOpts := []xservice.Option{
 		xservice.AdmissionOption(xadmission.AdmissionGroup(admissions...)),
 		xservice.PreUpOption(preUp),
 		xservice.PreDownOption(preDown),
@@ -340,7 +347,11 @@ func ParseService(cfg *config.ServiceConfig) (service.Service, error) {
 		xservice.ObserverOption(registry.ObserverRegistry().Get(cfg.Observer)),
 		xservice.ObserverPeriodOption(observerPeriod),
 		xservice.LoggerOption(serviceLogger),
-	)
+	}
+	if cc, ok := connLimiter.(xservice.ClientCounter); ok {
+		serviceOpts = append(serviceOpts, xservice.ClientCounterOption(cc))
+	}
+	s := xservice.NewService(cfg.Name, ln, h, serviceOpts...)
 
 	serviceLogger.Infof("listening on %s/%s", s.Addr().String(), s.Addr().Network())
 	return s, nil

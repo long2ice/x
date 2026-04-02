@@ -29,11 +29,12 @@ type event struct {
 }
 
 type statsEvent struct {
-	TotalConns   uint64 `json:"totalConns"`
-	CurrentConns uint64 `json:"currentConns"`
-	InputBytes   uint64 `json:"inputBytes"`
-	OutputBytes  uint64 `json:"outputBytes"`
-	TotalErrs    uint64 `json:"totalErrs"`
+	TotalConns     uint64 `json:"totalConns"`
+	CurrentConns   uint64 `json:"currentConns"`
+	CurrentClients []string `json:"currentClients"`
+	InputBytes     uint64 `json:"inputBytes"`
+	OutputBytes    uint64 `json:"outputBytes"`
+	TotalErrs      uint64 `json:"totalErrs"`
 }
 
 type statusEvent struct {
@@ -101,11 +102,12 @@ func (p *httpPlugin) Observe(ctx context.Context, events []observer.Event, opts 
 				Client:  ev.Client,
 				Type:    ev.Type(),
 				Stats: &statsEvent{
-					TotalConns:   ev.TotalConns,
-					CurrentConns: ev.CurrentConns,
-					InputBytes:   ev.InputBytes,
-					OutputBytes:  ev.OutputBytes,
-					TotalErrs:    ev.TotalErrs,
+					TotalConns:     ev.TotalConns,
+					CurrentConns:   ev.CurrentConns,
+					CurrentClients: ev.CurrentClients,
+					InputBytes:     ev.InputBytes,
+					OutputBytes:    ev.OutputBytes,
+					TotalErrs:      ev.TotalErrs,
 				},
 			})
 		}

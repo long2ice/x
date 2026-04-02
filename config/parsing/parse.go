@@ -30,5 +30,7 @@ const (
 
 	MDKeyDialTimeout = "dialTimeout"
 
+	MDKeyMaxClients = "maxClients"
+
 	MDKeyBlockProtocol = "block.protocol"
 )

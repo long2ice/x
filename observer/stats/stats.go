@@ -90,11 +90,12 @@ type StatsEvent struct {
 	Service string
 	Client  string
 
-	TotalConns   uint64
-	CurrentConns uint64
-	InputBytes   uint64
-	OutputBytes  uint64
-	TotalErrs    uint64
+	TotalConns     uint64
+	CurrentConns   uint64
+	CurrentClients []string
+	InputBytes     uint64
+	OutputBytes    uint64
+	TotalErrs      uint64
 }
 
 func (StatsEvent) Type() observer.EventType {

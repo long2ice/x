@@ -28,6 +28,12 @@ import (
 	"github.com/rs/xid"
 )
 
+// ClientCounter can report the number of unique client IPs with active connections.
+type ClientCounter interface {
+	ClientCount() int
+	ClientIPs() []string
+}
+
 type options struct {
 	admission      admission.Admission
 	recorders      []recorder.RecorderObject
@@ -38,6 +44,7 @@ type options struct {
 	stats          stats.Stats
 	observer       observer.Observer
 	observerPeriod time.Duration
+	clientCounter  ClientCounter
 	logger         logger.Logger
 }
 
@@ -94,6 +101,12 @@ func ObserverOption(observer observer.Observer) Option {
 func ObserverPeriodOption(period time.Duration) Option {
 	return func(opts *options) {
 		opts.observerPeriod = period
+	}
+}
+
+func ClientCounterOption(cc ClientCounter) Option {
+	return func(opts *options) {
+		opts.clientCounter = cc
 	}
 }
 
@@ -385,17 +398,19 @@ func (s *defaultService) observeStats(ctx context.Context) {
 				break
 			}
 
-			evs := []observer.Event{
-				xstats.StatsEvent{
-					Kind:         "service",
-					Service:      s.name,
-					TotalConns:   st.Get(stats.KindTotalConns),
-					CurrentConns: st.Get(stats.KindCurrentConns),
-					InputBytes:   st.Get(stats.KindInputBytes),
-					OutputBytes:  st.Get(stats.KindOutputBytes),
-					TotalErrs:    st.Get(stats.KindTotalErrs),
-				},
+			ev := xstats.StatsEvent{
+				Kind:         "service",
+				Service:      s.name,
+				TotalConns:   st.Get(stats.KindTotalConns),
+				CurrentConns: st.Get(stats.KindCurrentConns),
+				InputBytes:   st.Get(stats.KindInputBytes),
+				OutputBytes:  st.Get(stats.KindOutputBytes),
+				TotalErrs:    st.Get(stats.KindTotalErrs),
 			}
+			if s.options.clientCounter != nil {
+				ev.CurrentClients = s.options.clientCounter.ClientIPs()
+			}
+			evs := []observer.Event{ev}
 			if err := s.options.observer.Observe(ctx, evs); err != nil {
 				events = evs
 			}

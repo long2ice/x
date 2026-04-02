@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/go-gost/core/common/bufpool"
+	limiter "github.com/go-gost/core/limiter/conn"
 	"github.com/go-gost/core/logger"
 )
 
@@ -18,6 +19,7 @@ type ListenConfig struct {
 	ReadBufferSize int
 	TTL            time.Duration
 	Keepalive      bool
+	ConnLimiter    limiter.ConnLimiter
 	Logger         logger.Logger
 }
 type listener struct {
@@ -115,7 +117,20 @@ func (ln *listener) getConn(raddr net.Addr) *conn {
 		return c
 	}
 
+	var lim limiter.Limiter
+	if ln.config.ConnLimiter != nil {
+		host, _, _ := net.SplitHostPort(raddr.String())
+		lim = ln.config.ConnLimiter.Limiter(host)
+		if lim != nil && !lim.Allow(1) {
+			ln.config.Logger.Warnf("connection limit reached, client %s discarded", raddr)
+			return nil
+		}
+	}
+
 	c = newConn(ln.conn, ln.Addr(), raddr, ln.config.ReadQueueSize, ln.config.Keepalive)
+	if lim != nil {
+		c.onClose = func() { lim.Allow(-1) }
+	}
 	select {
 	case ln.cqueue <- c:
 		ln.connPool.Set(raddr.String(), c)
@@ -137,6 +152,7 @@ type conn struct {
 	closed     chan struct{}
 	closeMutex sync.Mutex
 	keepalive  bool
+	onClose    func()
 }
 
 func newConn(c net.PacketConn, laddr, remoteAddr net.Addr, queueSize int, keepalive bool) *conn {
@@ -193,6 +209,9 @@ func (c *conn) Close() error {
 	case <-c.closed:
 	default:
 		close(c.closed)
+		if c.onClose != nil {
+			c.onClose()
+		}
 	}
 	return nil
 }
