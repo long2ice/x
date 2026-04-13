@@ -10,7 +10,6 @@ import (
 	"github.com/go-gost/core/limiter"
 	"github.com/go-gost/core/limiter/traffic"
 	md "github.com/go-gost/core/metadata"
-	"github.com/go-gost/core/observer"
 	"github.com/go-gost/core/observer/stats"
 	"github.com/go-gost/core/recorder"
 	"github.com/go-gost/gosocks5"
@@ -222,26 +221,15 @@ func (h *socks5Handler) observeStats(ctx context.Context) {
 		return
 	}
 
-	var events []observer.Event
-
 	ticker := time.NewTicker(h.md.observerPeriod)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ticker.C:
-			if len(events) > 0 {
-				if err := h.options.Observer.Observe(ctx, events); err == nil {
-					events = nil
-				}
-				break
+			if evs := h.stats.Events(); len(evs) > 0 {
+				h.options.Observer.Observe(ctx, evs)
 			}
-
-			evs := h.stats.Events()
-			if err := h.options.Observer.Observe(ctx, evs); err != nil {
-				events = evs
-			}
-
 		case <-ctx.Done():
 			return
 		}

@@ -14,7 +14,6 @@ import (
 	"github.com/go-gost/core/limiter/traffic"
 	"github.com/go-gost/core/logger"
 	md "github.com/go-gost/core/metadata"
-	"github.com/go-gost/core/observer"
 	"github.com/go-gost/relay"
 	xctx "github.com/go-gost/x/ctx"
 	xnet "github.com/go-gost/x/internal/net"
@@ -265,26 +264,15 @@ func (h *routerHandler) observeStats(ctx context.Context) {
 		return
 	}
 
-	var events []observer.Event
-
 	ticker := time.NewTicker(h.md.observerPeriod)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ticker.C:
-			if len(events) > 0 {
-				if err := h.options.Observer.Observe(ctx, events); err == nil {
-					events = nil
-				}
-				break
+			if evs := h.stats.Events(); len(evs) > 0 {
+				h.options.Observer.Observe(ctx, evs)
 			}
-
-			evs := h.stats.Events()
-			if err := h.options.Observer.Observe(ctx, evs); err != nil {
-				events = evs
-			}
-
 		case <-ctx.Done():
 			return
 		}

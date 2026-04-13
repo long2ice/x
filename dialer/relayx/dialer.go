@@ -194,14 +194,21 @@ func (d *relayxDialer) randomUserAgent() string {
 type connWithBufReader struct {
 	net.Conn
 	br   *bufio.Reader
+	mu   sync.Mutex
 	once sync.Once
 }
 
 func (c *connWithBufReader) Read(b []byte) (int, error) {
-	if c.br != nil {
-		if c.br.Buffered() > 0 {
-			return c.br.Read(b)
-		}
+	c.mu.Lock()
+	br := c.br
+	if br != nil && br.Buffered() > 0 {
+		n, err := br.Read(b)
+		c.mu.Unlock()
+		return n, err
+	}
+	c.mu.Unlock()
+
+	if br != nil {
 		c.releaseReader()
 	}
 	return c.Conn.Read(b)
@@ -214,12 +221,14 @@ func (c *connWithBufReader) Close() error {
 
 func (c *connWithBufReader) releaseReader() {
 	c.once.Do(func() {
-		if c.br == nil {
-			return
-		}
-		c.br.Reset(nil)
-		dialerBufReaderPool.Put(c.br)
+		c.mu.Lock()
+		br := c.br
 		c.br = nil
+		c.mu.Unlock()
+		if br != nil {
+			br.Reset(nil)
+			dialerBufReaderPool.Put(br)
+		}
 	})
 }
 

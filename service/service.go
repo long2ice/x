@@ -378,21 +378,12 @@ func (s *defaultService) observeStats(ctx context.Context) {
 		d = 1 * time.Second
 	}
 
-	var events []observer.Event
-
 	ticker := time.NewTicker(d)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ticker.C:
-			if len(events) > 0 {
-				if err := s.options.observer.Observe(ctx, events); err == nil {
-					events = nil
-				}
-				break
-			}
-
 			st := s.status.Stats()
 			if st == nil || !st.IsUpdated() {
 				break
@@ -410,10 +401,9 @@ func (s *defaultService) observeStats(ctx context.Context) {
 			if s.options.clientCounter != nil {
 				ev.CurrentClients = s.options.clientCounter.ClientIPs()
 			}
-			evs := []observer.Event{ev}
-			if err := s.options.observer.Observe(ctx, evs); err != nil {
-				events = evs
-			}
+			// Observe is non-blocking when using BatchObserver;
+			// retry and backoff are handled at the batch layer.
+			s.options.observer.Observe(ctx, []observer.Event{ev})
 
 		case <-ctx.Done():
 			return
