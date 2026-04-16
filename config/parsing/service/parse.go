@@ -109,8 +109,6 @@ func ParseService(cfg *config.ServiceConfig) (service.Service, error) {
 	var netnsIn, netnsOut string
 	var dialTimeout time.Duration
 
-	var maxClients int
-
 	var limiterRefreshInterval time.Duration
 	var limiterCleanupInterval time.Duration
 	var limiterScope string
@@ -142,8 +140,6 @@ func ParseService(cfg *config.ServiceConfig) (service.Service, error) {
 
 		dialTimeout = mdutil.GetDuration(md, parsing.MDKeyDialTimeout)
 
-		maxClients = mdutil.GetInt(md, parsing.MDKeyMaxClients)
-
 		limiterRefreshInterval = mdutil.GetDuration(md, parsing.MDKeyLimiterRefreshInterval)
 		limiterCleanupInterval = mdutil.GetDuration(md, parsing.MDKeyLimiterCleanupInterval)
 		limiterScope = mdutil.GetString(md, parsing.MDKeyLimiterScope)
@@ -168,7 +164,10 @@ func ParseService(cfg *config.ServiceConfig) (service.Service, error) {
 		)
 	}
 
-	connLimiter := climiter.NewIPCountConnLimiter(registry.ConnLimiterRegistry().Get(cfg.CLimiter), maxClients)
+	connLimiter := climiter.NewCompositeConnLimiter(
+		registry.ConnLimiterRegistry().Get(cfg.CLimiter),
+		registry.ClientLimiterRegistry().Get(cfg.ILimiter),
+	)
 
 	listenOpts := []listener.Option{
 		listener.AddrOption(cfg.Addr),
@@ -348,8 +347,10 @@ func ParseService(cfg *config.ServiceConfig) (service.Service, error) {
 		xservice.ObserverPeriodOption(observerPeriod),
 		xservice.LoggerOption(serviceLogger),
 	}
-	if cc, ok := connLimiter.(xservice.ClientCounter); ok {
-		serviceOpts = append(serviceOpts, xservice.ClientCounterOption(cc))
+	if cc := climiter.GetClientCounter(connLimiter); cc != nil {
+		if sc, ok := cc.(xservice.ClientCounter); ok {
+			serviceOpts = append(serviceOpts, xservice.ClientCounterOption(sc))
+		}
 	}
 	s := xservice.NewService(cfg.Name, ln, h, serviceOpts...)
 

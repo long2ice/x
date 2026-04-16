@@ -187,6 +187,15 @@ func register(cfg *config.Config) error {
 		}
 	}
 
+	for name := range registry.ClientLimiterRegistry().GetAll() {
+		registry.ClientLimiterRegistry().Unregister(name)
+	}
+	for _, limiterCfg := range cfg.ILimiters {
+		if err := registry.ClientLimiterRegistry().Register(limiterCfg.Name, limiter_parser.ParseClientLimiter(limiterCfg)); err != nil {
+			return err
+		}
+	}
+
 	for name := range registry.HopRegistry().GetAll() {
 		registry.HopRegistry().Unregister(name)
 	}

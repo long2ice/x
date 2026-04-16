@@ -156,4 +156,10 @@ func Register(r *gin.Engine, opts *Options) {
 	config.POST("/rlimiters", createRateLimiter)
 	config.PUT("/rlimiters/:limiter", updateRateLimiter)
 	config.DELETE("/rlimiters/:limiter", deleteRateLimiter)
+
+	config.GET("/ilimiters", getClientLimiterList)
+	config.GET("/ilimiters/:limiter", getClientLimiter)
+	config.POST("/ilimiters", createClientLimiter)
+	config.PUT("/ilimiters/:limiter", updateClientLimiter)
+	config.DELETE("/ilimiters/:limiter", deleteClientLimiter)
 }

@@ -468,6 +468,7 @@ type ServiceConfig struct {
 	Limiter    string            `yaml:",omitempty" json:"limiter,omitempty"`
 	CLimiter   string            `yaml:"climiter,omitempty" json:"climiter,omitempty"`
 	RLimiter   string            `yaml:"rlimiter,omitempty" json:"rlimiter,omitempty"`
+	ILimiter   string            `yaml:"ilimiter,omitempty" json:"ilimiter,omitempty"`
 	Logger     string            `yaml:",omitempty" json:"logger,omitempty"`
 	Loggers    []string          `yaml:",omitempty" json:"loggers,omitempty"`
 	Observer   string            `yaml:",omitempty" json:"observer,omitempty"`
@@ -571,6 +572,7 @@ type Config struct {
 	Limiters   []*LimiterConfig   `yaml:",omitempty" json:"limiters,omitempty"`
 	CLimiters  []*LimiterConfig   `yaml:"climiters,omitempty" json:"climiters,omitempty"`
 	RLimiters  []*LimiterConfig   `yaml:"rlimiters,omitempty" json:"rlimiters,omitempty"`
+	ILimiters  []*LimiterConfig   `yaml:"ilimiters,omitempty" json:"ilimiters,omitempty"`
 	Observers  []*ObserverConfig  `yaml:",omitempty" json:"observers,omitempty"`
 	Loggers    []*LoggerConfig    `yaml:",omitempty" json:"loggers,omitempty"`
 	TLS        *TLSConfig         `yaml:",omitempty" json:"tls,omitempty"`

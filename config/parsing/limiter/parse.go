@@ -12,6 +12,7 @@ import (
 	"github.com/go-gost/x/internal/loader"
 	"github.com/go-gost/x/internal/plugin"
 	xconn "github.com/go-gost/x/limiter/conn"
+	xclient "github.com/go-gost/x/limiter/conn/wrapper"
 	xrate "github.com/go-gost/x/limiter/rate"
 	xtraffic "github.com/go-gost/x/limiter/traffic"
 	traffic_plugin "github.com/go-gost/x/limiter/traffic/plugin"
@@ -135,6 +136,54 @@ func ParseConnLimiter(cfg *config.LimiterConfig) (lim conn.ConnLimiter) {
 	)
 
 	return xconn.NewConnLimiter(opts...)
+}
+
+func ParseClientLimiter(cfg *config.LimiterConfig) (lim conn.ConnLimiter) {
+	if cfg == nil {
+		return nil
+	}
+
+	var opts []xclient.Option
+
+	if cfg.File != nil && cfg.File.Path != "" {
+		opts = append(opts, xclient.FileLoaderOption(loader.FileLoader(cfg.File.Path)))
+	}
+	if cfg.Redis != nil && cfg.Redis.Addr != "" {
+		switch cfg.Redis.Type {
+		case "list": // redis list
+			opts = append(opts, xclient.RedisLoaderOption(loader.RedisListLoader(
+				cfg.Redis.Addr,
+				loader.DBRedisLoaderOption(cfg.Redis.DB),
+				loader.UsernameRedisLoaderOption(cfg.Redis.Username),
+				loader.PasswordRedisLoaderOption(cfg.Redis.Password),
+				loader.KeyRedisLoaderOption(cfg.Redis.Key),
+			)))
+		default: // redis set
+			opts = append(opts, xclient.RedisLoaderOption(loader.RedisSetLoader(
+				cfg.Redis.Addr,
+				loader.DBRedisLoaderOption(cfg.Redis.DB),
+				loader.UsernameRedisLoaderOption(cfg.Redis.Username),
+				loader.PasswordRedisLoaderOption(cfg.Redis.Password),
+				loader.KeyRedisLoaderOption(cfg.Redis.Key),
+			)))
+		}
+	}
+	if cfg.HTTP != nil && cfg.HTTP.URL != "" {
+		opts = append(opts, xclient.HTTPLoaderOption(loader.HTTPLoader(
+			cfg.HTTP.URL,
+			loader.TimeoutHTTPLoaderOption(cfg.HTTP.Timeout),
+		)))
+	}
+	opts = append(opts,
+		xclient.LimitsOption(cfg.Limits...),
+		xclient.ReloadPeriodOption(cfg.Reload),
+		xclient.LoggerOption(logger.Default().WithFields(map[string]any{
+			"kind":    "limiter",
+			"limiter": cfg.Name,
+		})),
+	)
+
+	return xclient.NewClientLimiter(opts...)
 }
 
 func ParseRateLimiter(cfg *config.LimiterConfig) (lim rate.RateLimiter) {
