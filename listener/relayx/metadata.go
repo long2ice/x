@@ -4,6 +4,7 @@ import (
 	"time"
 
 	mdata "github.com/go-gost/core/metadata"
+	"github.com/go-gost/x/internal/util/mux"
 	mdutil "github.com/go-gost/x/metadata/util"
 )
 
@@ -17,11 +18,14 @@ type metadata struct {
 	path      string
 	decoyBody string
 
-	backlog         int
-	readTimeout     time.Duration
-	replayWindow    time.Duration
+	backlog          int
+	readTimeout      time.Duration
+	replayWindow     time.Duration
 	maxReplayEntries int
-	maxHeaderBytes  int
+	maxHeaderBytes   int
+
+	mux    bool
+	muxCfg *mux.Config
 }
 
 func (l *relayxListener) parseMetadata(md mdata.Metadata) error {
@@ -49,6 +53,21 @@ func (l *relayxListener) parseMetadata(md mdata.Metadata) error {
 	l.md.maxHeaderBytes = mdutil.GetInt(md, "maxHeaderBytes")
 	if l.md.maxHeaderBytes <= 0 {
 		l.md.maxHeaderBytes = 32 << 10
+	}
+
+	if mdutil.IsExists(md, "mux") {
+		l.md.mux = mdutil.GetBool(md, "mux")
+	} else {
+		l.md.mux = true
+	}
+	l.md.muxCfg = &mux.Config{
+		Version:           mdutil.GetInt(md, "mux.version"),
+		KeepAliveInterval: mdutil.GetDuration(md, "mux.keepaliveInterval"),
+		KeepAliveDisabled: mdutil.GetBool(md, "mux.keepaliveDisabled"),
+		KeepAliveTimeout:  mdutil.GetDuration(md, "mux.keepaliveTimeout"),
+		MaxFrameSize:      mdutil.GetInt(md, "mux.maxFrameSize"),
+		MaxReceiveBuffer:  mdutil.GetInt(md, "mux.maxReceiveBuffer"),
+		MaxStreamBuffer:   mdutil.GetInt(md, "mux.maxStreamBuffer"),
 	}
 
 	return nil

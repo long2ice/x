@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand/v2"
@@ -18,12 +19,19 @@ import (
 	"time"
 
 	"github.com/go-gost/core/dialer"
+	"github.com/go-gost/core/logger"
 	md "github.com/go-gost/core/metadata"
 	xctx "github.com/go-gost/x/ctx"
 	"github.com/go-gost/x/internal/net/proxyproto"
+	"github.com/go-gost/x/internal/util/mux"
 	"github.com/go-gost/x/registry"
 	utls "github.com/refraction-networking/utls"
 	"golang.org/x/crypto/hkdf"
+)
+
+const (
+	muxHeader  = "X-Relayx-Mux"
+	muxVersion = "smux/v1"
 )
 
 func init() {
@@ -31,9 +39,12 @@ func init() {
 }
 
 type relayxDialer struct {
-	md      metadata
-	authKey []byte
-	options dialer.Options
+	sessions     map[string]*muxSession
+	sessionMutex sync.Mutex
+	md           metadata
+	authKey      []byte
+	logger       logger.Logger
+	options      dialer.Options
 }
 
 func NewDialer(opts ...dialer.Option) dialer.Dialer {
@@ -41,7 +52,11 @@ func NewDialer(opts ...dialer.Option) dialer.Dialer {
 	for _, opt := range opts {
 		opt(&options)
 	}
-	return &relayxDialer{options: options}
+	return &relayxDialer{
+		sessions: make(map[string]*muxSession),
+		logger:   options.Logger,
+		options:  options,
+	}
 }
 
 func (d *relayxDialer) Init(m md.Metadata) error {
@@ -56,7 +71,36 @@ func (d *relayxDialer) Init(m md.Metadata) error {
 	return nil
 }
 
+// Multiplex implements dialer.Multiplexer interface.
+func (d *relayxDialer) Multiplex() bool {
+	return d.md.mux
+}
+
 func (d *relayxDialer) Dial(ctx context.Context, addr string, opts ...dialer.DialOption) (net.Conn, error) {
+	if !d.md.mux {
+		return d.dialRaw(ctx, addr, opts...)
+	}
+
+	d.sessionMutex.Lock()
+	defer d.sessionMutex.Unlock()
+
+	session, ok := d.sessions[addr]
+	if session != nil && session.IsClosed() {
+		delete(d.sessions, addr)
+		ok = false
+	}
+	if !ok {
+		conn, err := d.dialRaw(ctx, addr, opts...)
+		if err != nil {
+			return nil, err
+		}
+		session = &muxSession{conn: conn}
+		d.sessions[addr] = session
+	}
+	return session.conn, nil
+}
+
+func (d *relayxDialer) dialRaw(ctx context.Context, addr string, opts ...dialer.DialOption) (net.Conn, error) {
 	var options dialer.DialOptions
 	for _, opt := range opts {
 		opt(&options)
@@ -85,6 +129,73 @@ func (d *relayxDialer) Handshake(ctx context.Context, conn net.Conn, opts ...dia
 		defer conn.SetDeadline(time.Time{})
 	}
 
+	if !d.md.mux {
+		tunnel, _, err := d.doHandshake(ctx, conn, hopts, false)
+		if err != nil {
+			conn.Close()
+			return nil, err
+		}
+		return tunnel, nil
+	}
+
+	d.sessionMutex.Lock()
+	defer d.sessionMutex.Unlock()
+
+	session, ok := d.sessions[hopts.Addr]
+	if session != nil && session.conn != conn {
+		conn.Close()
+		return nil, errors.New("relayx: unrecognized connection")
+	}
+	if !ok {
+		session = &muxSession{conn: conn}
+		d.sessions[hopts.Addr] = session
+	}
+
+	if session.session != nil {
+		cc, err := session.GetConn()
+		if err != nil {
+			session.Close()
+			delete(d.sessions, hopts.Addr)
+			return nil, err
+		}
+		return cc, nil
+	}
+
+	tunnel, muxNegotiated, err := d.doHandshake(ctx, conn, hopts, true)
+	if err != nil {
+		conn.Close()
+		delete(d.sessions, hopts.Addr)
+		return nil, err
+	}
+
+	if !muxNegotiated {
+		// Peer does not speak mux; use this conn single-shot and forget the session
+		// so the next call opens a fresh TCP.
+		delete(d.sessions, hopts.Addr)
+		return tunnel, nil
+	}
+
+	s, err := mux.ClientSession(tunnel, d.md.muxCfg)
+	if err != nil {
+		tunnel.Close()
+		delete(d.sessions, hopts.Addr)
+		return nil, err
+	}
+	session.session = s
+
+	cc, err := session.GetConn()
+	if err != nil {
+		session.Close()
+		delete(d.sessions, hopts.Addr)
+		return nil, err
+	}
+	return cc, nil
+}
+
+// doHandshake performs the uTLS handshake and the relayx HTTP auth POST over conn.
+// When advertiseMux is true, the request includes the mux header; the returned flag
+// indicates whether the server echoed the same mux version.
+func (d *relayxDialer) doHandshake(ctx context.Context, conn net.Conn, hopts *dialer.HandshakeOptions, advertiseMux bool) (net.Conn, bool, error) {
 	uTLSConfig := &utls.Config{}
 	if tlsCfg := d.options.TLSConfig; tlsCfg != nil {
 		uTLSConfig.ServerName = tlsCfg.ServerName
@@ -94,14 +205,12 @@ func (d *relayxDialer) Handshake(ctx context.Context, conn net.Conn, opts ...dia
 	}
 	tlsConn := utls.UClient(conn, uTLSConfig, utls.HelloChrome_Auto)
 	if err := tlsConn.HandshakeContext(ctx); err != nil {
-		conn.Close()
-		return nil, err
+		return nil, false, err
 	}
 
 	token, err := d.buildToken()
 	if err != nil {
-		tlsConn.Close()
-		return nil, err
+		return nil, false, err
 	}
 
 	host := d.md.host
@@ -132,10 +241,12 @@ func (d *relayxDialer) Handshake(ctx context.Context, conn net.Conn, opts ...dia
 	req.Header.Set("Sec-Fetch-Dest", "empty")
 	req.Header.Set("Sec-Fetch-Mode", "cors")
 	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	if advertiseMux {
+		req.Header.Set(muxHeader, muxVersion)
+	}
 
 	if err := req.Write(tlsConn); err != nil {
-		tlsConn.Close()
-		return nil, err
+		return nil, false, err
 	}
 
 	br := dialerBufReaderPool.Get().(*bufio.Reader)
@@ -144,17 +255,17 @@ func (d *relayxDialer) Handshake(ctx context.Context, conn net.Conn, opts ...dia
 	if err != nil {
 		br.Reset(nil)
 		dialerBufReaderPool.Put(br)
-		tlsConn.Close()
-		return nil, err
+		return nil, false, err
 	}
 	if resp.StatusCode != http.StatusOK {
 		br.Reset(nil)
 		dialerBufReaderPool.Put(br)
-		tlsConn.Close()
-		return nil, fmt.Errorf("relayx: server returned %s", resp.Status)
+		return nil, false, fmt.Errorf("relayx: server returned %s", resp.Status)
 	}
 
-	return &connWithBufReader{Conn: tlsConn, br: br}, nil
+	muxNegotiated := advertiseMux && resp.Header.Get(muxHeader) == muxVersion
+	tunnel := &connWithBufReader{Conn: tlsConn, br: br}
+	return tunnel, muxNegotiated, nil
 }
 
 func (d *relayxDialer) buildToken() (string, error) {

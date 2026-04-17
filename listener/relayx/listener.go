@@ -26,6 +26,7 @@ import (
 	xnet "github.com/go-gost/x/internal/net"
 	xhttp "github.com/go-gost/x/internal/net/http"
 	"github.com/go-gost/x/internal/net/proxyproto"
+	"github.com/go-gost/x/internal/util/mux"
 	xtls "github.com/go-gost/x/internal/util/tls"
 	climiter "github.com/go-gost/x/limiter/conn/wrapper"
 	limiter_wrapper "github.com/go-gost/x/limiter/traffic/wrapper"
@@ -33,6 +34,11 @@ import (
 	stats "github.com/go-gost/x/observer/stats/wrapper"
 	"github.com/go-gost/x/registry"
 	"golang.org/x/crypto/hkdf"
+)
+
+const (
+	muxHeader  = "X-Relayx-Mux"
+	muxVersion = "smux/v1"
 )
 
 func init() {
@@ -85,12 +91,12 @@ func (l *relayxListener) Init(m md.Metadata) error {
 	}
 	l.initReplayCache()
 
-	mux := http.NewServeMux()
-	mux.Handle("/", http.HandlerFunc(l.serveHTTP))
+	sm := http.NewServeMux()
+	sm.Handle("/", http.HandlerFunc(l.serveHTTP))
 
 	l.server = &http.Server{
 		Addr:              l.options.Addr,
-		Handler:           mux,
+		Handler:           sm,
 		ReadHeaderTimeout: l.md.readTimeout,
 		MaxHeaderBytes:    l.md.maxHeaderBytes,
 	}
@@ -181,6 +187,8 @@ func (l *relayxListener) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	useMux := l.md.mux && r.Header.Get(muxHeader) == muxVersion
+
 	hj, ok := w.(http.Hijacker)
 	if !ok {
 		http.Error(w, "hijack not supported", http.StatusInternalServerError)
@@ -193,7 +201,20 @@ func (l *relayxListener) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := rw.WriteString("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nCache-Control: no-store\r\nServer: nginx/1.27.4\r\n\r\n"); err != nil {
+	var respBuilder strings.Builder
+	respBuilder.WriteString("HTTP/1.1 200 OK\r\n")
+	respBuilder.WriteString("Content-Type: application/octet-stream\r\n")
+	respBuilder.WriteString("Cache-Control: no-store\r\n")
+	respBuilder.WriteString("Server: nginx/1.27.4\r\n")
+	if useMux {
+		respBuilder.WriteString(muxHeader)
+		respBuilder.WriteString(": ")
+		respBuilder.WriteString(muxVersion)
+		respBuilder.WriteString("\r\n")
+	}
+	respBuilder.WriteString("\r\n")
+
+	if _, err := rw.WriteString(respBuilder.String()); err != nil {
 		conn.Close()
 		return
 	}
@@ -202,20 +223,27 @@ func (l *relayxListener) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx := context.WithoutCancel(r.Context())
+	baseCtx := context.WithoutCancel(r.Context())
 	if cc, ok := conn.(xctx.Context); ok && cc.Context() != nil {
-		ctx = cc.Context()
+		baseCtx = cc.Context()
 	}
 	if clientIP != nil {
-		ctx = xctx.ContextWithSrcAddr(ctx, &net.TCPAddr{IP: clientIP})
+		baseCtx = xctx.ContextWithSrcAddr(baseCtx, &net.TCPAddr{IP: clientIP})
+	}
+
+	tunnel := &connWithBufReader{
+		Conn: conn,
+		br:   rw.Reader,
+	}
+
+	if useMux {
+		go l.serveMux(tunnel, baseCtx, log)
+		return
 	}
 
 	c := &contextConn{
-		Conn: &connWithBufReader{
-			Conn: conn,
-			br:   rw.Reader,
-		},
-		ctx: ctx,
+		Conn: tunnel,
+		ctx:  baseCtx,
 	}
 
 	select {
@@ -223,6 +251,34 @@ func (l *relayxListener) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		c.Close()
 		log.Warnf("connection queue is full, client %s discarded", c.RemoteAddr())
+	}
+}
+
+func (l *relayxListener) serveMux(tunnel net.Conn, baseCtx context.Context, log logger.Logger) {
+	defer tunnel.Close()
+
+	session, err := mux.ServerSession(tunnel, l.md.muxCfg)
+	if err != nil {
+		log.Error(err)
+		return
+	}
+	defer session.Close()
+
+	for {
+		stream, err := session.Accept()
+		if err != nil {
+			if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
+				log.Debugf("mux accept: %v", err)
+			}
+			return
+		}
+		c := &contextConn{Conn: stream, ctx: baseCtx}
+		select {
+		case l.cqueue <- c:
+		default:
+			c.Close()
+			log.Warnf("connection queue is full, stream from %s discarded", tunnel.RemoteAddr())
+		}
 	}
 }
 
