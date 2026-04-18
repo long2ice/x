@@ -39,12 +39,10 @@ func init() {
 }
 
 type relayxDialer struct {
-	sessions     map[string]*muxSession
-	sessionMutex sync.Mutex
-	md           metadata
-	authKey      []byte
-	logger       logger.Logger
-	options      dialer.Options
+	md      metadata
+	authKey []byte
+	logger  logger.Logger
+	options dialer.Options
 }
 
 func NewDialer(opts ...dialer.Option) dialer.Dialer {
@@ -53,9 +51,8 @@ func NewDialer(opts ...dialer.Option) dialer.Dialer {
 		opt(&options)
 	}
 	return &relayxDialer{
-		sessions: make(map[string]*muxSession),
-		logger:   options.Logger,
-		options:  options,
+		logger:  options.Logger,
+		options: options,
 	}
 }
 
@@ -81,23 +78,23 @@ func (d *relayxDialer) Dial(ctx context.Context, addr string, opts ...dialer.Dia
 		return d.dialRaw(ctx, addr, opts...)
 	}
 
-	d.sessionMutex.Lock()
-	defer d.sessionMutex.Unlock()
+	key := d.sessionKey(addr)
+	entry := getSharedEntry(key)
 
-	session, ok := d.sessions[addr]
-	if session != nil && session.IsClosed() {
-		delete(d.sessions, addr)
-		ok = false
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+
+	if entry.session != nil && entry.session.IsClosed() {
+		entry.session = nil
 	}
-	if !ok {
+	if entry.session == nil {
 		conn, err := d.dialRaw(ctx, addr, opts...)
 		if err != nil {
 			return nil, err
 		}
-		session = &muxSession{conn: conn}
-		d.sessions[addr] = session
+		entry.session = &muxSession{conn: conn}
 	}
-	return session.conn, nil
+	return entry.session.conn, nil
 }
 
 func (d *relayxDialer) dialRaw(ctx context.Context, addr string, opts ...dialer.DialOption) (net.Conn, error) {
@@ -138,24 +135,29 @@ func (d *relayxDialer) Handshake(ctx context.Context, conn net.Conn, opts ...dia
 		return tunnel, nil
 	}
 
-	d.sessionMutex.Lock()
-	defer d.sessionMutex.Unlock()
+	key := d.sessionKey(hopts.Addr)
+	entry := getSharedEntry(key)
 
-	session, ok := d.sessions[hopts.Addr]
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+
+	session := entry.session
 	if session != nil && session.conn != conn {
+		// The caller handed us a conn for a now-stale entry; tell them to retry.
 		conn.Close()
 		return nil, errors.New("relayx: unrecognized connection")
 	}
-	if !ok {
+	if session == nil {
 		session = &muxSession{conn: conn}
-		d.sessions[hopts.Addr] = session
+		entry.session = session
 	}
 
 	if session.session != nil {
 		cc, err := session.GetConn()
 		if err != nil {
 			session.Close()
-			delete(d.sessions, hopts.Addr)
+			entry.session = nil
+			dropSharedEntry(key, entry)
 			return nil, err
 		}
 		return cc, nil
@@ -164,21 +166,24 @@ func (d *relayxDialer) Handshake(ctx context.Context, conn net.Conn, opts ...dia
 	tunnel, muxNegotiated, err := d.doHandshake(ctx, conn, hopts, true)
 	if err != nil {
 		conn.Close()
-		delete(d.sessions, hopts.Addr)
+		entry.session = nil
+		dropSharedEntry(key, entry)
 		return nil, err
 	}
 
 	if !muxNegotiated {
-		// Peer does not speak mux; use this conn single-shot and forget the session
-		// so the next call opens a fresh TCP.
-		delete(d.sessions, hopts.Addr)
+		// Peer does not speak mux; use this conn single-shot and forget the
+		// shared entry so the next caller opens a fresh TCP.
+		entry.session = nil
+		dropSharedEntry(key, entry)
 		return tunnel, nil
 	}
 
 	s, err := mux.ClientSession(tunnel, d.md.muxCfg)
 	if err != nil {
 		tunnel.Close()
-		delete(d.sessions, hopts.Addr)
+		entry.session = nil
+		dropSharedEntry(key, entry)
 		return nil, err
 	}
 	session.session = s
@@ -186,7 +191,8 @@ func (d *relayxDialer) Handshake(ctx context.Context, conn net.Conn, opts ...dia
 	cc, err := session.GetConn()
 	if err != nil {
 		session.Close()
-		delete(d.sessions, hopts.Addr)
+		entry.session = nil
+		dropSharedEntry(key, entry)
 		return nil, err
 	}
 	return cc, nil

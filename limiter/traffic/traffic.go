@@ -15,7 +15,6 @@ import (
 	"github.com/go-gost/core/logger"
 	"github.com/go-gost/x/internal/loader"
 	xlogger "github.com/go-gost/x/logger"
-	"github.com/patrickmn/go-cache"
 	"github.com/yl2chen/cidranger"
 )
 
@@ -26,7 +25,10 @@ const (
 
 const (
 	defaultExpiration = 15 * time.Second
-	cleanupInterval   = 30 * time.Second
+	// cleanupInterval is the minimum period between lazy evictions of expired
+	// entries.  Unlike the go-cache janitor, this does not spawn a goroutine;
+	// it is consulted from the existing reload loop.
+	cleanupInterval = 30 * time.Second
 )
 
 type options struct {
@@ -85,11 +87,11 @@ type trafficLimiter struct {
 	generators     sync.Map
 	cidrGenerators cidranger.Ranger
 	// connection level in/out limits
-	connInLimits  *cache.Cache
-	connOutLimits *cache.Cache
+	connInLimits  *ttlMap
+	connOutLimits *ttlMap
 	// service level in/out limits
-	inLimits   *cache.Cache
-	outLimits  *cache.Cache
+	inLimits   *ttlMap
+	outLimits  *ttlMap
 	options    options
 	logger     logger.Logger
 	mu         sync.RWMutex
@@ -105,10 +107,10 @@ func NewTrafficLimiter(opts ...Option) traffic.TrafficLimiter {
 	ctx, cancel := context.WithCancel(context.TODO())
 	lim := &trafficLimiter{
 		cidrGenerators: cidranger.NewPCTrieRanger(),
-		connInLimits:   cache.New(defaultExpiration, cleanupInterval),
-		connOutLimits:  cache.New(defaultExpiration, cleanupInterval),
-		inLimits:       cache.New(defaultExpiration, cleanupInterval),
-		outLimits:      cache.New(defaultExpiration, cleanupInterval),
+		connInLimits:   newTTLMap(),
+		connOutLimits:  newTTLMap(),
+		inLimits:       newTTLMap(),
+		outLimits:      newTTLMap(),
 		options:        options,
 		cancelFunc:     cancel,
 		logger:         options.logger,
@@ -117,9 +119,31 @@ func NewTrafficLimiter(opts ...Option) traffic.TrafficLimiter {
 		lim.logger = xlogger.Nop()
 	}
 
-	go lim.periodReload(ctx)
+	globalEvictRegistry.add(lim)
+	if lim.hasReloadSource() {
+		// Loader-backed limiter: keep the periodic reload goroutine.
+		// Eviction still runs from globalEvictRegistry so we save the
+		// dedicated evict ticker.
+		go lim.periodReload(ctx)
+	} else {
+		// Static limiter (inline cfg.Limits only): do one synchronous
+		// load to populate service-level limits, then rely on the
+		// shared eviction loop.  Zero per-instance goroutines.
+		if err := lim.reload(ctx); err != nil {
+			lim.logger.Warnf("reload: %v", err)
+		}
+	}
 
 	return lim
+}
+
+func (l *trafficLimiter) hasReloadSource() bool {
+	if l.options.period > 0 {
+		return true
+	}
+	return l.options.fileLoader != nil ||
+		l.options.redisLoader != nil ||
+		l.options.httpLoader != nil
 }
 
 // In obtains a traffic input limiter based on key.
@@ -183,7 +207,7 @@ func (l *trafficLimiter) In(ctx context.Context, key string, opts ...limiter.Opt
 			if v, _ := p[0].(*cidrLimitEntry); v != nil {
 				if lim := v.generator.In(); lim != nil {
 					lims = append(lims, lim)
-					l.inLimits.Set(host, lim, cache.NoExpiration)
+					l.inLimits.Set(host, lim, ttlNoExpiration)
 				}
 			}
 		}
@@ -262,7 +286,7 @@ func (l *trafficLimiter) Out(ctx context.Context, key string, opts ...limiter.Op
 			if v, _ := p[0].(*cidrLimitEntry); v != nil {
 				if lim := v.generator.Out(); lim != nil {
 					lims = append(lims, lim)
-					l.outLimits.Set(host, lim, cache.NoExpiration)
+					l.outLimits.Set(host, lim, ttlNoExpiration)
 				}
 			}
 		}
@@ -280,6 +304,9 @@ func (l *trafficLimiter) Out(ctx context.Context, key string, opts ...limiter.Op
 	return lim
 }
 
+// periodReload runs only for limiters with a reload source (file, redis,
+// http, or explicit period).  Eviction is delegated to globalEvictRegistry
+// so this loop no longer owns an evict ticker.
 func (l *trafficLimiter) periodReload(ctx context.Context) error {
 	if err := l.reload(ctx); err != nil {
 		l.logger.Warnf("reload: %v", err)
@@ -287,6 +314,8 @@ func (l *trafficLimiter) periodReload(ctx context.Context) error {
 
 	period := l.options.period
 	if period <= 0 {
+		// Has a loader but no explicit period — reload once and stop.
+		// The shared evict registry still prunes expired entries.
 		return nil
 	}
 	if period < time.Second {
@@ -301,12 +330,18 @@ func (l *trafficLimiter) periodReload(ctx context.Context) error {
 		case <-ticker.C:
 			if err := l.reload(ctx); err != nil {
 				l.logger.Warnf("reload: %v", err)
-				// return err
 			}
 		case <-ctx.Done():
 			return ctx.Err()
 		}
 	}
+}
+
+func (l *trafficLimiter) evictExpired() {
+	l.connInLimits.evictExpired()
+	l.connOutLimits.evictExpired()
+	l.inLimits.evictExpired()
+	l.outLimits.evictExpired()
 }
 
 func (l *trafficLimiter) reload(ctx context.Context) error {
@@ -327,7 +362,7 @@ func (l *trafficLimiter) reload(ctx context.Context) error {
 			}
 		} else {
 			if value.in > 0 {
-				l.inLimits.Set(ServiceLimitKey, NewLimiter(value.in), cache.NoExpiration)
+				l.inLimits.Set(ServiceLimitKey, NewLimiter(value.in), ttlNoExpiration)
 			}
 		}
 
@@ -340,7 +375,7 @@ func (l *trafficLimiter) reload(ctx context.Context) error {
 			}
 		} else {
 			if value.out > 0 {
-				l.outLimits.Set(ServiceLimitKey, NewLimiter(value.out), cache.NoExpiration)
+				l.outLimits.Set(ServiceLimitKey, NewLimiter(value.out), ttlNoExpiration)
 			}
 		}
 		delete(values, ServiceLimitKey)
@@ -411,7 +446,7 @@ func (l *trafficLimiter) reload(ctx context.Context) error {
 				delete(inLimits, key)
 			} else {
 				if value.in > 0 {
-					l.inLimits.Set(key, NewLimiter(value.in), cache.NoExpiration)
+					l.inLimits.Set(key, NewLimiter(value.in), ttlNoExpiration)
 				}
 			}
 
@@ -425,7 +460,7 @@ func (l *trafficLimiter) reload(ctx context.Context) error {
 				delete(outLimits, key)
 			} else {
 				if value.out > 0 {
-					l.outLimits.Set(key, NewLimiter(value.out), cache.NoExpiration)
+					l.outLimits.Set(key, NewLimiter(value.out), ttlNoExpiration)
 				}
 			}
 		}
@@ -617,6 +652,7 @@ func (l *trafficLimiter) parseLimit(s string) (key string, in, out int) {
 
 func (l *trafficLimiter) Close() error {
 	l.cancelFunc()
+	globalEvictRegistry.remove(l)
 	if l.options.fileLoader != nil {
 		l.options.fileLoader.Close()
 	}

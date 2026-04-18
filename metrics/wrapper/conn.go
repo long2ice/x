@@ -20,10 +20,18 @@ var (
 )
 
 // serverConn is a server side Conn with metrics supported.
+//
+// Counters are resolved once at Wrap time and cached on the struct to avoid
+// allocating a fresh metrics.Labels map on every Read/Write.  This keeps the
+// hot path allocation-free at the cost of not picking up metrics.Enable()
+// toggles that happen after the connection is wrapped, which matches how the
+// agent uses the metrics system (enabled once at startup).
 type serverConn struct {
 	net.Conn
-	service  string
-	clientIP string
+	service    string
+	clientIP   string
+	inCounter  metrics.Counter
+	outCounter metrics.Counter
 }
 
 func WrapConn(service string, c net.Conn) net.Conn {
@@ -32,36 +40,32 @@ func WrapConn(service string, c net.Conn) net.Conn {
 	}
 
 	host, _, _ := net.SplitHostPort(c.RemoteAddr().String())
+	labels := metrics.Labels{
+		"service": service,
+		"client":  host,
+	}
 
 	return &serverConn{
-		service:  service,
-		Conn:     c,
-		clientIP: host,
+		service:    service,
+		Conn:       c,
+		clientIP:   host,
+		inCounter:  xmetrics.GetCounter(xmetrics.MetricServiceTransferInputBytesCounter, labels),
+		outCounter: xmetrics.GetCounter(xmetrics.MetricServiceTransferOutputBytesCounter, labels),
 	}
 }
 
 func (c *serverConn) Read(b []byte) (n int, err error) {
 	n, err = c.Conn.Read(b)
-	if counter := xmetrics.GetCounter(
-		xmetrics.MetricServiceTransferInputBytesCounter,
-		metrics.Labels{
-			"service": c.service,
-			"client":  c.clientIP,
-		}); counter != nil {
-		counter.Add(float64(n))
+	if c.inCounter != nil {
+		c.inCounter.Add(float64(n))
 	}
 	return
 }
 
 func (c *serverConn) Write(b []byte) (n int, err error) {
 	n, err = c.Conn.Write(b)
-	if counter := xmetrics.GetCounter(
-		xmetrics.MetricServiceTransferOutputBytesCounter,
-		metrics.Labels{
-			"service": c.service,
-			"client":  c.clientIP,
-		}); counter != nil {
-		counter.Add(float64(n))
+	if c.outCounter != nil {
+		c.outCounter.Add(float64(n))
 	}
 	return
 }

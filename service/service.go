@@ -23,7 +23,6 @@ import (
 	"github.com/go-gost/core/service"
 	xctx "github.com/go-gost/x/ctx"
 	xmetrics "github.com/go-gost/x/metrics"
-	xstats "github.com/go-gost/x/observer/stats"
 	"github.com/google/shlex"
 	"github.com/rs/xid"
 )
@@ -164,7 +163,8 @@ func (s *defaultService) Serve() error {
 	defer cancel()
 
 	if s.status.Stats() != nil {
-		go s.observeStats(gctx)
+		globalObserveRegistry.add(s, gctx)
+		defer globalObserveRegistry.remove(s)
 	}
 
 	if v := xmetrics.GetGauge(
@@ -362,52 +362,6 @@ func (s *defaultService) setState(state State) {
 			State:   state,
 			Msg:     msg,
 		}})
-	}
-}
-
-func (s *defaultService) observeStats(ctx context.Context) {
-	if s.options.observer == nil {
-		return
-	}
-
-	d := s.options.observerPeriod
-	if d == 0 {
-		d = 5 * time.Second
-	}
-	if d < time.Second {
-		d = 1 * time.Second
-	}
-
-	ticker := time.NewTicker(d)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			st := s.status.Stats()
-			if st == nil || !st.IsUpdated() {
-				break
-			}
-
-			ev := xstats.StatsEvent{
-				Kind:         "service",
-				Service:      s.name,
-				TotalConns:   st.Get(stats.KindTotalConns),
-				CurrentConns: st.Get(stats.KindCurrentConns),
-				InputBytes:   st.Get(stats.KindInputBytes),
-				OutputBytes:  st.Get(stats.KindOutputBytes),
-				TotalErrs:    st.Get(stats.KindTotalErrs),
-			}
-			if s.options.clientCounter != nil {
-				ev.CurrentClients = s.options.clientCounter.ClientIPs()
-			}
-			// Observe is non-blocking when using BatchObserver;
-			// retry and backoff are handled at the batch layer.
-			s.options.observer.Observe(ctx, []observer.Event{ev})
-
-		case <-ctx.Done():
-			return
-		}
 	}
 }
 
