@@ -7,6 +7,7 @@ import (
 	"github.com/go-gost/core/chain"
 	"github.com/go-gost/core/connector"
 	"github.com/go-gost/core/dialer"
+	xctx "github.com/go-gost/x/ctx"
 	net_dialer "github.com/go-gost/x/internal/net/dialer"
 )
 
@@ -43,6 +44,9 @@ func (tr *Transport) Dial(ctx context.Context, addr string) (net.Conn, error) {
 			return tr.options.Route.Dial(ctx, network, addr)
 		}
 	}
+	if id := routeIDFromTransport(tr); id != "" {
+		ctx = xctx.ContextWithRouteID(ctx, id)
+	}
 	opts := []dialer.DialOption{
 		dialer.HostDialOption(tr.options.Addr),
 		dialer.NetDialerDialOption(netd),
@@ -50,7 +54,26 @@ func (tr *Transport) Dial(ctx context.Context, addr string) (net.Conn, error) {
 	return tr.dialer.Dial(ctx, addr, opts...)
 }
 
+// routeIDFromTransport extracts the owning chain's name from the Transport's
+// Route, so multiplexing dialers can disambiguate sessions per-chain.
+func routeIDFromTransport(tr *Transport) string {
+	if tr == nil || tr.options.Route == nil {
+		return ""
+	}
+	cr, ok := tr.options.Route.(*chainRoute)
+	if !ok || cr == nil || cr.options.Chain == nil {
+		return ""
+	}
+	if cn, ok := cr.options.Chain.(chainNamer); ok && cn != nil {
+		return cn.Name()
+	}
+	return ""
+}
+
 func (tr *Transport) Handshake(ctx context.Context, conn net.Conn) (net.Conn, error) {
+	if id := routeIDFromTransport(tr); id != "" {
+		ctx = xctx.ContextWithRouteID(ctx, id)
+	}
 	var err error
 	if hs, ok := tr.dialer.(dialer.Handshaker); ok {
 		conn, err = hs.Handshake(ctx, conn,

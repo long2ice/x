@@ -1,9 +1,12 @@
 package relayx
 
 import (
+	"context"
 	"strings"
 	"sync"
 	"time"
+
+	xctx "github.com/go-gost/x/ctx"
 )
 
 // sessionKey identifies a "dialer config equivalence class".  Two relayxDialer
@@ -26,6 +29,12 @@ type sessionKey struct {
 	muxMaxReceiveBuf  int
 	muxMaxStreamBuf   int
 	proxyProto        int
+	// routeID disambiguates sessions that share an upstream addr + creds but are
+	// reached through different chains. Without it, chain-A and chain-B with
+	// identical last-hop dialer config would collapse into one TCP session even
+	// though their underlying paths differ, causing traffic to flow through the
+	// wrong physical route.
+	routeID string
 }
 
 // sharedEntry holds one shared muxSession plus a per-key mutex used to
@@ -43,7 +52,7 @@ var (
 	sharedRegistry   = map[sessionKey]*sharedEntry{}
 )
 
-func (d *relayxDialer) sessionKey(addr string) sessionKey {
+func (d *relayxDialer) sessionKey(ctx context.Context, addr string) sessionKey {
 	var (
 		serverName   string
 		insecureSkip bool
@@ -62,6 +71,7 @@ func (d *relayxDialer) sessionKey(addr string) sessionKey {
 		insecureSkip: insecureSkip,
 		nextProtos:   nextProtos,
 		proxyProto:   int(d.options.ProxyProtocol),
+		routeID:      xctx.RouteIDFromContext(ctx),
 	}
 	if d.md.muxCfg != nil {
 		k.muxVersion = d.md.muxCfg.Version

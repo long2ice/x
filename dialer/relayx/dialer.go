@@ -78,7 +78,7 @@ func (d *relayxDialer) Dial(ctx context.Context, addr string, opts ...dialer.Dia
 		return d.dialRaw(ctx, addr, opts...)
 	}
 
-	key := d.sessionKey(addr)
+	key := d.sessionKey(ctx, addr)
 	entry := getSharedEntry(key)
 
 	entry.mu.Lock()
@@ -135,7 +135,7 @@ func (d *relayxDialer) Handshake(ctx context.Context, conn net.Conn, opts ...dia
 		return tunnel, nil
 	}
 
-	key := d.sessionKey(hopts.Addr)
+	key := d.sessionKey(ctx, hopts.Addr)
 	entry := getSharedEntry(key)
 
 	entry.mu.Lock()

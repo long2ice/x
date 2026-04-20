@@ -90,3 +90,17 @@ func ClientIDFromContext(ctx context.Context) ClientID {
 	v, _ := ctx.Value(clientIDKey{}).(ClientID)
 	return v
 }
+
+// routeIDKey carries a stable identifier for the chain/route that owns the
+// current Dial. Multiplexing dialers (e.g. relayx) use it to avoid collapsing
+// sessions across different chains that happen to share an upstream addr.
+type routeIDKey struct{}
+
+func ContextWithRouteID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, routeIDKey{}, id)
+}
+
+func RouteIDFromContext(ctx context.Context) string {
+	v, _ := ctx.Value(routeIDKey{}).(string)
+	return v
+}
