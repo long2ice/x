@@ -7,6 +7,8 @@ import (
 	"io"
 	"math"
 	"net"
+
+	"github.com/go-gost/core/common/bufpool"
 )
 
 type tcpConn struct {
@@ -68,11 +70,13 @@ func (c *udpConn) Write(b []byte) (n int, err error) {
 		return
 	}
 
-	var bb [2]byte
-	binary.BigEndian.PutUint16(bb[:], uint16(len(b)))
-	_, err = c.Conn.Write(bb[:])
-	if err != nil {
-		return
-	}
-	return c.Conn.Write(b)
+	// Combine length header and payload into a single Write so that each
+	// UDP datagram maps to one TCP segment (with TCP_NODELAY) instead of two,
+	// avoiding extra latency/jitter that hurts real-time flows like VoIP.
+	buf := bufpool.Get(len(b) + 2)
+	defer bufpool.Put(buf)
+	binary.BigEndian.PutUint16(buf[:2], uint16(len(b)))
+	copy(buf[2:], b)
+	_, err = c.Conn.Write(buf)
+	return
 }
