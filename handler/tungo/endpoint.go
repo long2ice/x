@@ -2,6 +2,7 @@ package tungo
 
 import (
 	"context"
+	"errors"
 	"io"
 	"sync"
 
@@ -86,7 +87,9 @@ func (e *endpoint) dispatchLoop(cancel context.CancelFunc) {
 
 		n, err := e.rw.Read(data)
 		if err != nil {
-			e.log.Error(err)
+			if !errors.Is(err, io.EOF) {
+				e.log.Error(err)
+			}
 			break
 		}
 
