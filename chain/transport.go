@@ -96,6 +96,14 @@ func (tr *Transport) Connect(ctx context.Context, conn net.Conn, network, addres
 	if tr.options.SockOpts != nil {
 		netd.Mark = tr.options.SockOpts.Mark
 	}
+	// Route any auxiliary dial the connector performs (e.g. SOCKS5 UDP
+	// ASSOCIATE relay address) through the preceding chain, so it doesn't
+	// bypass the tunnel and go direct over the public internet.
+	if tr.options.Route != nil && len(tr.options.Route.Nodes()) > 0 {
+		netd.DialFunc = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return tr.options.Route.Dial(ctx, network, addr)
+		}
+	}
 	return tr.connector.Connect(ctx, conn, network, address,
 		connector.DialerConnectOption(netd),
 	)
@@ -125,5 +133,5 @@ func (tr *Transport) Options() *chain.TransportOptions {
 func (tr *Transport) Copy() chain.Transporter {
 	tr2 := &Transport{}
 	*tr2 = *tr
-	return tr
+	return tr2
 }

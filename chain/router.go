@@ -201,7 +201,13 @@ func routePath(route chain.Route) (path []*chain.Node) {
 		return
 	}
 	for _, node := range route.Nodes() {
-		if tr := node.Options().Transport; tr != nil {
+		// Only recurse for multiplex transports — the preceding route on a
+		// mux node represents the *physical* path used to reach it. Non-mux
+		// transports also carry a preceding-route snapshot now (so
+		// connectors can route auxiliary dials through the chain), but those
+		// nodes already appear directly in the parent route, so recursing
+		// would just print duplicates.
+		if tr := node.Options().Transport; tr != nil && tr.Multiplex() {
 			path = append(path, routePath(tr.Options().Route)...)
 		}
 		path = append(path, node)

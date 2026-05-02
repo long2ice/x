@@ -99,11 +99,26 @@ func (c *Chain) Route(ctx context.Context, network, address string, opts ...chai
 		if node == nil {
 			return rt
 		}
-		if node.Options().Transport.Multiplex() {
-			tr := node.Options().Transport.Copy()
-			tr.Options().Route = rt
-			node = node.Copy()
-			node.Options().Transport = tr
+
+		// Attach a *snapshot* of the preceding route to this node's
+		// transport, so connectors that perform auxiliary dials — e.g.
+		// SOCKS5 UDP ASSOCIATE dialing the returned UDP relay address —
+		// can route that traffic through the chain instead of going direct.
+		// A snapshot (not a shared rt) is critical: continuing to mutate rt
+		// in subsequent iterations would otherwise cause this node's Route
+		// to also contain itself, leading to infinite recursion when the
+		// auxiliary dial re-enters the chain.
+		preRoute := NewRoute(ChainRouteOption(c))
+		for _, pn := range rt.Nodes() {
+			preRoute.addNode(pn)
+		}
+
+		tr := node.Options().Transport.Copy()
+		tr.Options().Route = preRoute
+		node = node.Copy()
+		node.Options().Transport = tr
+
+		if tr.Multiplex() {
 			rt = NewRoute(ChainRouteOption(c))
 		}
 

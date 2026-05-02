@@ -25,7 +25,7 @@ func (c *bindConn) RemoteAddr() net.Addr {
 }
 
 type udpRelayConn struct {
-	udpConn    *net.UDPConn
+	udpConn    net.Conn
 	tcpConn    net.Conn
 	taddr      net.Addr
 	bufferSize int
