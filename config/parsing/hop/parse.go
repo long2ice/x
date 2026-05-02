@@ -167,10 +167,6 @@ func ParseHop(cfg *config.HopConfig, log logger.Logger) (hop.Hop, error) {
 		xhop.LoggerOption(hopLogger),
 	}
 
-	if hc := selector_parser.ParseHealthChecker(cfg.Selector, hopLogger); hc != nil {
-		opts = append(opts, xhop.HealthCheckerOption(hc))
-	}
-
 	if cfg.File != nil && cfg.File.Path != "" {
 		opts = append(opts, xhop.FileLoaderOption(loader.FileLoader(cfg.File.Path)))
 	}

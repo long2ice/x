@@ -33,18 +33,18 @@ func ParseChain(cfg *config.ChainConfig, log logger.Logger) (chain.Chainer, erro
 	)
 
 	for _, ch := range cfg.Hops {
-		var hop hop.Hop
+		var h hop.Hop
 		var err error
 
 		if ch.Nodes != nil || ch.Plugin != nil {
-			if hop, err = hop_parser.ParseHop(ch, log); err != nil {
+			if h, err = hop_parser.ParseHop(ch, log); err != nil {
 				return nil, err
 			}
 		} else {
-			hop = registry.HopRegistry().Get(ch.Name)
+			h = registry.HopRegistry().Get(ch.Name)
 		}
-		if hop != nil {
-			c.AddHop(hop)
+		if h != nil {
+			c.AddHop(h)
 		}
 	}
 
