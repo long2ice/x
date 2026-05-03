@@ -112,10 +112,11 @@ func (h *tungoHandler) Handle(ctx context.Context, conn net.Conn, opts ...handle
 	th := &transportHandler{
 		service: h.options.Service,
 
-		tcpQueue:   make(chan adapter.TCPConn),
-		udpQueue:   make(chan adapter.UDPConn),
-		udpTimeout: h.md.udpTimeout,
-		procCancel: func() {},
+		tcpQueue:       make(chan adapter.TCPConn),
+		udpQueue:       make(chan adapter.UDPConn),
+		udpTimeout:     h.md.udpTimeout,
+		tcpIdleTimeout: h.md.tcpIdleTimeout,
+		procCancel:     func() {},
 
 		sniffing:                h.md.sniffing,
 		sniffingUDP:             h.md.sniffingUDP,

@@ -18,6 +18,13 @@ type metadata struct {
 	udpTimeout    time.Duration
 	udpBufferSize int
 
+	// tcpIdleTimeout bounds how long a proxied TCP conn can sit fully idle
+	// before being force-closed. Mobile peers (Wi-Fi/cellular switch, app
+	// killed) often abandon connections without sending FIN, leaving the
+	// server-side gVisor TCB and handler goroutine alive until TCP keepalive
+	// reaps them ~5 min later. This caps that delay.
+	tcpIdleTimeout time.Duration
+
 	sniffing                bool
 	sniffingUDP             bool
 	sniffingTimeout         time.Duration
@@ -42,6 +49,11 @@ type metadata struct {
 func (h *tungoHandler) parseMetadata(md mdata.Metadata) (err error) {
 	h.md.udpTimeout = mdutil.GetDuration(md, "udpTimeout", "tungo.udpTimeout")
 	h.md.udpBufferSize = mdutil.GetInt(md, "udp.bufferSize", "udpBufferSize")
+
+	h.md.tcpIdleTimeout = mdutil.GetDuration(md, "tcpIdleTimeout", "tungo.tcpIdleTimeout")
+	if h.md.tcpIdleTimeout <= 0 {
+		h.md.tcpIdleTimeout = 60 * time.Second
+	}
 
 	h.md.sniffing = mdutil.GetBool(md, "sniffing")
 	h.md.sniffingUDP = mdutil.GetBool(md, "sniffing.udp")

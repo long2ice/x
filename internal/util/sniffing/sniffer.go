@@ -116,6 +116,10 @@ type Sniffer struct {
 	MitmBypass         bypass.Bypass
 
 	ReadTimeout time.Duration
+
+	// IdleTimeout caps how long the proxied stream may stay fully idle
+	// before being force-closed. Zero leaves it unbounded (legacy behavior).
+	IdleTimeout time.Duration
 }
 
 func (h *Sniffer) HandleHTTP(ctx context.Context, network string, conn net.Conn, opts ...HandleOption) error {
@@ -450,7 +454,7 @@ func (h *Sniffer) handleUpgradeResponse(ctx context.Context, rw, cc io.ReadWrite
 	}
 
 	// return xnet.Transport(rw, cc)
-	return xnet.Pipe(ctx, rw, cc)
+	return xnet.PipeIdle(ctx, rw, cc, h.IdleTimeout)
 }
 
 func (h *Sniffer) sniffingWebsocketFrame(ctx context.Context, rw, cc io.ReadWriter, ro *xrecorder.HandlerRecorderObject, log logger.Logger) error {
@@ -665,7 +669,7 @@ func (h *Sniffer) HandleTLS(ctx context.Context, network string, conn net.Conn, 
 
 	log.Infof("%s <-> %s", ro.RemoteAddr, ro.Host)
 	// xnet.Transport(conn, cc)
-	xnet.Pipe(ctx, conn, cc)
+	xnet.PipeIdle(ctx, conn, cc, h.IdleTimeout)
 	log.WithFields(map[string]any{
 		"duration": time.Since(ro.Time),
 	}).Infof("%s >-< %s", ro.RemoteAddr, ro.Host)
