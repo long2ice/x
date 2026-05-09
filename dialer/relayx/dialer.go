@@ -1,7 +1,6 @@
 package relayx
 
 import (
-	"bufio"
 	"context"
 	"crypto/hmac"
 	crand "crypto/rand"
@@ -15,7 +14,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"sync"
 	"time"
 
 	"github.com/go-gost/core/dialer"
@@ -24,14 +22,17 @@ import (
 	xctx "github.com/go-gost/x/ctx"
 	"github.com/go-gost/x/internal/net/proxyproto"
 	"github.com/go-gost/x/internal/util/mux"
+	ws_util "github.com/go-gost/x/internal/util/ws"
+	"github.com/go-gost/x/internal/util/wspad"
 	"github.com/go-gost/x/registry"
+	"github.com/gorilla/websocket"
 	utls "github.com/refraction-networking/utls"
 	"golang.org/x/crypto/hkdf"
 )
 
 const (
-	muxHeader  = "X-Relayx-Mux"
-	muxVersion = "smux/v1"
+	tokenMuxFlagBit byte = 0x80
+	respMuxFlagBit  byte = 0x01
 )
 
 func init() {
@@ -198,9 +199,10 @@ func (d *relayxDialer) Handshake(ctx context.Context, conn net.Conn, opts ...dia
 	return cc, nil
 }
 
-// doHandshake performs the uTLS handshake and the relayx HTTP auth POST over conn.
-// When advertiseMux is true, the request includes the mux header; the returned flag
-// indicates whether the server echoed the same mux version.
+// doHandshake performs the uTLS handshake then upgrades the connection to a
+// WebSocket session. The mux flag is encoded covertly in the auth token nonce;
+// the server echoes its decision in the first byte of the first WS binary
+// message after the upgrade response.
 func (d *relayxDialer) doHandshake(ctx context.Context, conn net.Conn, hopts *dialer.HandshakeOptions, advertiseMux bool) (net.Conn, bool, error) {
 	uTLSConfig := &utls.Config{}
 	if tlsCfg := d.options.TLSConfig; tlsCfg != nil {
@@ -214,7 +216,7 @@ func (d *relayxDialer) doHandshake(ctx context.Context, conn net.Conn, hopts *di
 		return nil, false, err
 	}
 
-	token, err := d.buildToken()
+	token, err := d.buildToken(advertiseMux)
 	if err != nil {
 		return nil, false, err
 	}
@@ -228,56 +230,58 @@ func (d *relayxDialer) doHandshake(ctx context.Context, conn net.Conn, hopts *di
 		}
 	}
 
-	req := &http.Request{
-		Method:     http.MethodPost,
-		URL:        &url.URL{Scheme: "https", Host: host, Path: d.randomPath()},
-		Host:       host,
-		ProtoMajor: 1,
-		ProtoMinor: 1,
-		Header:     make(http.Header),
-		Body:       http.NoBody,
-	}
-	req.Header.Set("Content-Type", "application/octet-stream")
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("User-Agent", d.randomUserAgent())
-	req.Header.Set("Accept", "*/*")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
-	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
-	req.Header.Set("Connection", "keep-alive")
-	req.Header.Set("Sec-Fetch-Dest", "empty")
-	req.Header.Set("Sec-Fetch-Mode", "cors")
-	req.Header.Set("Sec-Fetch-Site", "same-origin")
-	if advertiseMux {
-		req.Header.Set(muxHeader, muxVersion)
+	headers := http.Header{}
+	headers.Set("Authorization", "Bearer "+token)
+	headers.Set("User-Agent", d.randomUserAgent())
+	headers.Set("Origin", "https://"+host)
+	headers.Set("Cache-Control", "no-cache")
+	headers.Set("Pragma", "no-cache")
+	headers.Set("Accept-Language", "en-US,en;q=0.9")
+
+	wsd := &websocket.Dialer{
+		NetDialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
+			return tlsConn, nil
+		},
+		HandshakeTimeout:  d.md.handshakeTimeout,
+		EnableCompression: false,
 	}
 
-	if err := req.Write(tlsConn); err != nil {
-		return nil, false, err
-	}
-
-	br := dialerBufReaderPool.Get().(*bufio.Reader)
-	br.Reset(tlsConn)
-	resp, err := http.ReadResponse(br, req)
+	u := &url.URL{Scheme: "ws", Host: host, Path: d.randomPath()}
+	wsConn, resp, err := wsd.DialContext(ctx, u.String(), headers)
 	if err != nil {
-		br.Reset(nil)
-		dialerBufReaderPool.Put(br)
-		return nil, false, err
+		if resp != nil {
+			resp.Body.Close()
+		}
+		return nil, false, fmt.Errorf("relayx: ws upgrade: %w", err)
 	}
-	if resp.StatusCode != http.StatusOK {
-		br.Reset(nil)
-		dialerBufReaderPool.Put(br)
-		return nil, false, fmt.Errorf("relayx: server returned %s", resp.Status)
-	}
+	resp.Body.Close()
 
-	muxNegotiated := advertiseMux && resp.Header.Get(muxHeader) == muxVersion
-	tunnel := &connWithBufReader{Conn: tlsConn, br: br}
+	tunnel := wspad.Conn(ws_util.Conn(wsConn))
+
+	muxBuf := make([]byte, 4096)
+	n, err := tunnel.Read(muxBuf)
+	if err != nil {
+		tunnel.Close()
+		return nil, false, fmt.Errorf("relayx: read mux signal: %w", err)
+	}
+	if n == 0 {
+		tunnel.Close()
+		return nil, false, errors.New("relayx: empty mux signal")
+	}
+	muxNegotiated := advertiseMux && muxBuf[0]&respMuxFlagBit != 0
+
 	return tunnel, muxNegotiated, nil
 }
 
-func (d *relayxDialer) buildToken() (string, error) {
+func (d *relayxDialer) buildToken(advertiseMux bool) (string, error) {
 	var nonce [16]byte
 	if _, err := crand.Read(nonce[:]); err != nil {
 		return "", err
+	}
+	if advertiseMux {
+		nonce[0] |= tokenMuxFlagBit
+	} else {
+		nonce[0] &^= tokenMuxFlagBit
 	}
 	var tsBuf [8]byte
 	binary.BigEndian.PutUint64(tsBuf[:], uint64(time.Now().Unix()))
@@ -306,47 +310,6 @@ func (d *relayxDialer) randomUserAgent() string {
 		return d.md.userAgent
 	}
 	return defaultUserAgents[randomIndex(len(defaultUserAgents))]
-}
-
-type connWithBufReader struct {
-	net.Conn
-	br   *bufio.Reader
-	mu   sync.Mutex
-	once sync.Once
-}
-
-func (c *connWithBufReader) Read(b []byte) (int, error) {
-	c.mu.Lock()
-	br := c.br
-	if br != nil && br.Buffered() > 0 {
-		n, err := br.Read(b)
-		c.mu.Unlock()
-		return n, err
-	}
-	c.mu.Unlock()
-
-	if br != nil {
-		c.releaseReader()
-	}
-	return c.Conn.Read(b)
-}
-
-func (c *connWithBufReader) Close() error {
-	c.releaseReader()
-	return c.Conn.Close()
-}
-
-func (c *connWithBufReader) releaseReader() {
-	c.once.Do(func() {
-		c.mu.Lock()
-		br := c.br
-		c.br = nil
-		c.mu.Unlock()
-		if br != nil {
-			br.Reset(nil)
-			dialerBufReaderPool.Put(br)
-		}
-	})
 }
 
 func randomIndex(n int) int {
@@ -385,6 +348,3 @@ var defaultUserAgents = []string{
 	"Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.4 Safari/605.1.15",
 }
 
-var dialerBufReaderPool = sync.Pool{
-	New: func() any { return bufio.NewReaderSize(nil, 4096) },
-}

@@ -1,15 +1,16 @@
 package relayx
 
 import (
-	"bufio"
 	"context"
 	"crypto/hmac"
+	crand "crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -28,17 +29,22 @@ import (
 	"github.com/go-gost/x/internal/net/proxyproto"
 	"github.com/go-gost/x/internal/util/mux"
 	xtls "github.com/go-gost/x/internal/util/tls"
+	ws_util "github.com/go-gost/x/internal/util/ws"
+	"github.com/go-gost/x/internal/util/wspad"
 	climiter "github.com/go-gost/x/limiter/conn/wrapper"
 	limiter_wrapper "github.com/go-gost/x/limiter/traffic/wrapper"
 	metrics "github.com/go-gost/x/metrics/wrapper"
 	stats "github.com/go-gost/x/observer/stats/wrapper"
 	"github.com/go-gost/x/registry"
+	"github.com/gorilla/websocket"
 	"golang.org/x/crypto/hkdf"
 )
 
 const (
-	muxHeader  = "X-Relayx-Mux"
-	muxVersion = "smux/v1"
+	tokenMuxFlagBit     byte = 0x80
+	respMuxFlagBit      byte = 0x01
+	minResponseBodySize      = 64
+	maxResponseBodySize      = 512
 )
 
 func init() {
@@ -53,13 +59,14 @@ var (
 )
 
 type relayxListener struct {
-	addr    net.Addr
-	server  *http.Server
-	cqueue  chan net.Conn
-	errChan chan error
-	log     logger.Logger
-	md      metadata
-	options listener.Options
+	addr     net.Addr
+	server   *http.Server
+	upgrader *websocket.Upgrader
+	cqueue   chan net.Conn
+	errChan  chan error
+	log      logger.Logger
+	md       metadata
+	options  listener.Options
 
 	authKey []byte
 
@@ -90,6 +97,12 @@ func (l *relayxListener) Init(m md.Metadata) error {
 		return err
 	}
 	l.initReplayCache()
+
+	l.upgrader = &websocket.Upgrader{
+		HandshakeTimeout:  l.md.readTimeout,
+		CheckOrigin:       func(*http.Request) bool { return true },
+		EnableCompression: false,
+	}
 
 	sm := http.NewServeMux()
 	sm.Handle("/", http.HandlerFunc(l.serveHTTP))
@@ -173,67 +186,55 @@ func (l *relayxListener) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		log.Trace(string(dump))
 	}
 
-	if r.Method != http.MethodPost {
-		l.serveDecoy(w)
+	if !websocket.IsWebSocketUpgrade(r) {
+		l.serveProbe(w, r)
 		return
 	}
 	if l.md.path != "" && r.URL.Path != l.md.path {
-		l.serveDecoy(w)
+		l.serveNotFound(w)
 		return
 	}
-	if err := l.validateToken(r.Header.Get("Authorization")); err != nil {
+	muxRequested, err := l.validateToken(r.Header.Get("Authorization"))
+	if err != nil {
 		log.WithFields(map[string]any{"reason": err.Error()}).Warn("probe resistance: unauthenticated request")
-		l.serveDecoy(w)
+		l.serveNotFound(w)
 		return
 	}
 
-	useMux := l.md.mux && r.Header.Get(muxHeader) == muxVersion
+	useMux := l.md.mux && muxRequested
 
-	hj, ok := w.(http.Hijacker)
-	if !ok {
-		http.Error(w, "hijack not supported", http.StatusInternalServerError)
-		return
-	}
+	respHeaders := http.Header{}
+	respHeaders.Set("Server", l.md.serverHeader)
 
-	conn, rw, err := hj.Hijack()
+	wsConn, err := l.upgrader.Upgrade(w, r, respHeaders)
 	if err != nil {
 		log.Error(err)
 		return
 	}
 
-	var respBuilder strings.Builder
-	respBuilder.WriteString("HTTP/1.1 200 OK\r\n")
-	respBuilder.WriteString("Content-Type: application/octet-stream\r\n")
-	respBuilder.WriteString("Cache-Control: no-store\r\n")
-	respBuilder.WriteString("Server: nginx/1.27.4\r\n")
-	if useMux {
-		respBuilder.WriteString(muxHeader)
-		respBuilder.WriteString(": ")
-		respBuilder.WriteString(muxVersion)
-		respBuilder.WriteString("\r\n")
-	}
-	respBuilder.WriteString("\r\n")
-
-	if _, err := rw.WriteString(respBuilder.String()); err != nil {
-		conn.Close()
-		return
-	}
-	if err := rw.Flush(); err != nil {
-		conn.Close()
-		return
-	}
-
 	baseCtx := context.WithoutCancel(r.Context())
-	if cc, ok := conn.(xctx.Context); ok && cc.Context() != nil {
+	if cc, ok := wsConn.NetConn().(xctx.Context); ok && cc.Context() != nil {
 		baseCtx = cc.Context()
 	}
 	if clientIP != nil {
 		baseCtx = xctx.ContextWithSrcAddr(baseCtx, &net.TCPAddr{IP: clientIP})
 	}
 
-	tunnel := &connWithBufReader{
-		Conn: conn,
-		br:   rw.Reader,
+	tunnel := wspad.Conn(ws_util.ContextConn(baseCtx, wsConn))
+
+	muxSignal := make([]byte, minResponseBodySize+randIntn(maxResponseBodySize-minResponseBodySize+1))
+	if _, err := crand.Read(muxSignal); err != nil {
+		tunnel.Close()
+		return
+	}
+	if useMux {
+		muxSignal[0] |= respMuxFlagBit
+	} else {
+		muxSignal[0] &^= respMuxFlagBit
+	}
+	if _, err := tunnel.Write(muxSignal); err != nil {
+		tunnel.Close()
+		return
 	}
 
 	if useMux {
@@ -291,13 +292,13 @@ func (l *relayxListener) deriveAuthKey() error {
 	return nil
 }
 
-func (l *relayxListener) validateToken(authHeader string) error {
+func (l *relayxListener) validateToken(authHeader string) (bool, error) {
 	if !strings.HasPrefix(authHeader, "Bearer ") {
-		return errUnauthorized
+		return false, errUnauthorized
 	}
 	raw, err := base64.RawURLEncoding.DecodeString(authHeader[7:])
 	if err != nil || len(raw) != 56 {
-		return errUnauthorized
+		return false, errUnauthorized
 	}
 
 	nonce := raw[:16]
@@ -311,19 +312,19 @@ func (l *relayxListener) validateToken(authHeader string) error {
 		windowSec = 300
 	}
 	if ts+windowSec < now || ts > now+windowSec {
-		return errTokenExpired
+		return false, errTokenExpired
 	}
 
 	h := hmac.New(sha256.New, l.authKey)
 	h.Write(nonce)
 	h.Write(tsBuf)
 	if !hmac.Equal(mac, h.Sum(nil)) {
-		return errTokenMismatch
+		return false, errTokenMismatch
 	}
 	if !l.rememberToken(raw[:24], int64(ts)+int64(windowSec)) {
-		return errTokenReplay
+		return false, errTokenReplay
 	}
-	return nil
+	return nonce[0]&tokenMuxFlagBit != 0, nil
 }
 
 func (l *relayxListener) rememberToken(tokenID []byte, expiresAt int64) bool {
@@ -393,30 +394,37 @@ func (l *relayxListener) advanceReplayLocked(now int64) {
 	l.replayLastSec = now
 }
 
+func (l *relayxListener) serveProbe(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet && r.URL.Path == "/" {
+		l.serveDecoy(w)
+		return
+	}
+	l.serveNotFound(w)
+}
+
 func (l *relayxListener) serveDecoy(w http.ResponseWriter) {
 	body := l.md.decoyBody
 	if body == "" {
 		body = defaultDecoyHTML
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Server", "nginx/1.27.4")
+	w.Header().Set("Server", l.md.serverHeader)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(body))
 }
 
-type connWithBufReader struct {
-	net.Conn
-	br *bufio.Reader
+func (l *relayxListener) serveNotFound(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/html")
+	w.Header().Set("Server", l.md.serverHeader)
+	w.WriteHeader(http.StatusNotFound)
+	_, _ = w.Write([]byte(notFoundHTML))
 }
 
-func (c *connWithBufReader) Read(b []byte) (int, error) {
-	if c.br != nil {
-		if c.br.Buffered() > 0 {
-			return c.br.Read(b)
-		}
-		c.br = nil
+func randIntn(n int) int {
+	if n <= 1 {
+		return 0
 	}
-	return c.Conn.Read(b)
+	return rand.IntN(n)
 }
 
 type contextConn struct {
@@ -436,3 +444,12 @@ working. Further configuration is required.</p>
 <p><em>Thank you for using nginx.</em></p>
 </body>
 </html>`
+
+const notFoundHTML = `<html>
+<head><title>404 Not Found</title></head>
+<body>
+<center><h1>404 Not Found</h1></center>
+<hr><center>nginx</center>
+</body>
+</html>
+`

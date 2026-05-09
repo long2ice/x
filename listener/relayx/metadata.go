@@ -1,6 +1,7 @@
 package relayx
 
 import (
+	"math/rand/v2"
 	"time"
 
 	mdata "github.com/go-gost/core/metadata"
@@ -15,8 +16,9 @@ const (
 type metadata struct {
 	key string
 
-	path      string
-	decoyBody string
+	path         string
+	decoyBody    string
+	serverHeader string
 
 	backlog          int
 	readTimeout      time.Duration
@@ -28,10 +30,29 @@ type metadata struct {
 	muxCfg *mux.Config
 }
 
+var serverHeaderPool = []string{
+	"nginx/1.24.0",
+	"nginx/1.26.2",
+	"nginx",
+	"Apache/2.4.58",
+	"Apache",
+	"cloudflare",
+	"Caddy",
+	"AmazonS3",
+}
+
+func pickServerHeader() string {
+	return serverHeaderPool[rand.IntN(len(serverHeaderPool))]
+}
+
 func (l *relayxListener) parseMetadata(md mdata.Metadata) error {
 	l.md.key = mdutil.GetString(md, "key")
 	l.md.path = mdutil.GetString(md, "path")
 	l.md.decoyBody = mdutil.GetString(md, "decoyBody", "decoy")
+	l.md.serverHeader = mdutil.GetString(md, "serverHeader")
+	if l.md.serverHeader == "" {
+		l.md.serverHeader = pickServerHeader()
+	}
 
 	l.md.backlog = mdutil.GetInt(md, "backlog")
 	if l.md.backlog <= 0 {
