@@ -164,9 +164,15 @@ func ParseService(cfg *config.ServiceConfig) (service.Service, error) {
 		)
 	}
 
+	clientLimiter := registry.ClientLimiterRegistry().Get(cfg.ILimiter)
+	if clientLimiter == nil {
+		// Always install a tracking-only client limiter so observer stats
+		// include CurrentClients even when no ilimiter is configured.
+		clientLimiter = climiter.NewClientLimiter()
+	}
 	connLimiter := climiter.NewCompositeConnLimiter(
 		registry.ConnLimiterRegistry().Get(cfg.CLimiter),
-		registry.ClientLimiterRegistry().Get(cfg.ILimiter),
+		clientLimiter,
 	)
 
 	listenOpts := []listener.Option{
