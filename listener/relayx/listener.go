@@ -76,6 +76,14 @@ type relayxListener struct {
 	replayMaxEntries int
 	replayIndex      map[[24]byte]int64
 	replayBuckets    []map[[24]byte]struct{}
+
+	// tunnels tracks every hijacked websocket conn (mux or single-shot).
+	// http.Server.Close does not touch hijacked conns, so we close them
+	// ourselves on Close() to cut zombie mux sessions that would otherwise
+	// keep clients pinned to a dead service after a config reload.
+	tunnelsMu sync.Mutex
+	tunnels   map[net.Conn]struct{}
+	closed    bool
 }
 
 func NewListener(opts ...listener.Option) listener.Listener {
@@ -168,7 +176,41 @@ func (l *relayxListener) Accept() (conn net.Conn, err error) {
 
 func (l *relayxListener) Addr() net.Addr { return l.addr }
 
-func (l *relayxListener) Close() error { return l.server.Close() }
+func (l *relayxListener) Close() error {
+	// Forcibly close every hijacked tunnel before tearing down the http.Server,
+	// so in-flight mux sessions cannot survive listener close. Without this,
+	// clients keep complete confidence in their cached mux session (the TCP
+	// stays ESTABLISHED, smux keepalives keep replying from the orphaned
+	// serveMux goroutine) and never reconnect to the new listener.
+	l.tunnelsMu.Lock()
+	l.closed = true
+	tunnels := l.tunnels
+	l.tunnels = nil
+	l.tunnelsMu.Unlock()
+	for c := range tunnels {
+		_ = c.Close()
+	}
+	return l.server.Close()
+}
+
+func (l *relayxListener) addTunnel(c net.Conn) bool {
+	l.tunnelsMu.Lock()
+	defer l.tunnelsMu.Unlock()
+	if l.closed {
+		return false
+	}
+	if l.tunnels == nil {
+		l.tunnels = make(map[net.Conn]struct{})
+	}
+	l.tunnels[c] = struct{}{}
+	return true
+}
+
+func (l *relayxListener) removeTunnel(c net.Conn) {
+	l.tunnelsMu.Lock()
+	defer l.tunnelsMu.Unlock()
+	delete(l.tunnels, c)
+}
 
 func (l *relayxListener) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	clientIP := xhttp.GetClientIP(r)
@@ -237,14 +279,26 @@ func (l *relayxListener) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Register the hijacked tunnel so listener.Close() can break zombie mux
+	// sessions; if the listener already closed in the gap between Upgrade and
+	// here, drop the tunnel immediately.
+	if !l.addTunnel(tunnel) {
+		tunnel.Close()
+		return
+	}
+
 	if useMux {
-		go l.serveMux(tunnel, baseCtx, log)
+		go func() {
+			defer l.removeTunnel(tunnel)
+			l.serveMux(tunnel, baseCtx, log)
+		}()
 		return
 	}
 
 	c := &contextConn{
-		Conn: tunnel,
-		ctx:  baseCtx,
+		Conn:     tunnel,
+		ctx:      baseCtx,
+		listener: l,
 	}
 
 	select {
@@ -430,9 +484,23 @@ func randIntn(n int) int {
 type contextConn struct {
 	net.Conn
 	ctx context.Context
+	// listener, when non-nil, is notified on Close so the hijacked tunnel
+	// it represents is removed from the listener's tracking set. Mux
+	// substreams leave this nil — only the parent tunnel is tracked.
+	listener *relayxListener
+	once     sync.Once
 }
 
 func (c *contextConn) Context() context.Context { return c.ctx }
+
+func (c *contextConn) Close() error {
+	if c.listener != nil {
+		c.once.Do(func() {
+			c.listener.removeTunnel(c.Conn)
+		})
+	}
+	return c.Conn.Close()
+}
 
 const defaultDecoyHTML = `<!DOCTYPE html>
 <html>

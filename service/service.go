@@ -121,6 +121,13 @@ type defaultService struct {
 	handler  handler.Handler
 	status   *Status
 	options  options
+
+	// ctx is the parent context for every accepted connection. Close() cancels
+	// it so in-flight handler goroutines (e.g. xnet.Pipe) can unblock instead
+	// of waiting for their underlying TCP to error out — important when the
+	// service is restarted on config reload while client traffic is in flight.
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 func NewService(name string, ln listener.Listener, h handler.Handler, opts ...Option) service.Service {
@@ -128,6 +135,7 @@ func NewService(name string, ln listener.Listener, h handler.Handler, opts ...Op
 	for _, opt := range opts {
 		opt(&options)
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	s := &defaultService{
 		name:     name,
 		listener: ln,
@@ -138,6 +146,8 @@ func NewService(name string, ln listener.Listener, h handler.Handler, opts ...Op
 			events:     make([]Event, 0, MaxEventSize),
 			stats:      options.stats,
 		},
+		ctx:    ctx,
+		cancel: cancel,
 	}
 	s.setState(StateRunning)
 
@@ -158,9 +168,7 @@ func (s *defaultService) Serve() error {
 		Message: fmt.Sprintf("service %s is listening on %s", s.name, s.listener.Addr()),
 	})
 
-	gctx, cancel := context.WithCancel(context.Background())
-
-	defer cancel()
+	gctx := s.ctx
 
 	if s.status.Stats() != nil {
 		globalObserveRegistry.add(s, gctx)
@@ -312,6 +320,13 @@ func (s *defaultService) Close() error {
 	s.execCmds("pre-down", s.options.preDown)
 	defer s.execCmds("post-down", s.options.postDown)
 
+	// Cancel the per-service context first so any in-flight handler goroutine
+	// observing it (e.g. via xnet.Pipe) can unwind and close its conn before
+	// we wait on listener.Close — otherwise Serve's wg.Wait would block on
+	// handlers still parked on Read.
+	if s.cancel != nil {
+		s.cancel()
+	}
 	if closer, ok := s.handler.(io.Closer); ok {
 		closer.Close()
 	}
