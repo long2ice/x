@@ -15,10 +15,13 @@ type metadata struct {
 	userAgent string
 
 	handshakeTimeout time.Duration
+	muxIdleTimeout   time.Duration
 
 	mux    bool
 	muxCfg *mux.Config
 }
+
+const defaultMuxIdleTimeout = 30 * time.Second
 
 func (d *relayxDialer) parseMetadata(md mdata.Metadata) error {
 	d.md.key = mdutil.GetString(md, "key")
@@ -34,6 +37,11 @@ func (d *relayxDialer) parseMetadata(md mdata.Metadata) error {
 		d.md.mux = mdutil.GetBool(md, "mux")
 	} else {
 		d.md.mux = true
+	}
+	if mdutil.IsExists(md, "mux.idleTimeout", "mux.idle.timeout") {
+		d.md.muxIdleTimeout = mdutil.GetDuration(md, "mux.idleTimeout", "mux.idle.timeout")
+	} else {
+		d.md.muxIdleTimeout = defaultMuxIdleTimeout
 	}
 	d.md.muxCfg = &mux.Config{
 		Version:           mdutil.GetInt(md, "mux.version"),

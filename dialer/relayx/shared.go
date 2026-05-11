@@ -15,20 +15,21 @@ import (
 // into one TCP connection.  All fields are comparable so this works directly
 // as a map key.
 type sessionKey struct {
-	addr              string
-	mdKey             string
-	host              string
-	serverName        string
-	insecureSkip      bool
-	nextProtos        string
-	muxVersion        int
-	muxKAInterval     time.Duration
-	muxKADisabled     bool
-	muxKATimeout      time.Duration
-	muxMaxFrameSize   int
-	muxMaxReceiveBuf  int
-	muxMaxStreamBuf   int
-	proxyProto        int
+	addr             string
+	mdKey            string
+	host             string
+	serverName       string
+	insecureSkip     bool
+	nextProtos       string
+	muxVersion       int
+	muxKAInterval    time.Duration
+	muxKADisabled    bool
+	muxKATimeout     time.Duration
+	muxIdleTimeout   time.Duration
+	muxMaxFrameSize  int
+	muxMaxReceiveBuf int
+	muxMaxStreamBuf  int
+	proxyProto       int
 	// routeID disambiguates sessions that share an upstream addr + creds but are
 	// reached through different chains. Without it, chain-A and chain-B with
 	// identical last-hop dialer config would collapse into one TCP session even
@@ -43,8 +44,9 @@ type sessionKey struct {
 // heavyweight work (TLS + HTTP auth + smux negotiation) runs under entry.mu
 // so other keys are not blocked.
 type sharedEntry struct {
-	mu      sync.Mutex
-	session *muxSession
+	mu           sync.Mutex
+	session      *muxSession
+	reaperCancel context.CancelFunc
 }
 
 var (
@@ -78,6 +80,7 @@ func (d *relayxDialer) sessionKey(ctx context.Context, addr string) sessionKey {
 		k.muxKAInterval = d.md.muxCfg.KeepAliveInterval
 		k.muxKADisabled = d.md.muxCfg.KeepAliveDisabled
 		k.muxKATimeout = d.md.muxCfg.KeepAliveTimeout
+		k.muxIdleTimeout = d.md.muxIdleTimeout
 		k.muxMaxFrameSize = d.md.muxCfg.MaxFrameSize
 		k.muxMaxReceiveBuf = d.md.muxCfg.MaxReceiveBuffer
 		k.muxMaxStreamBuf = d.md.muxCfg.MaxStreamBuffer
@@ -104,3 +107,83 @@ func dropSharedEntry(k sessionKey, expect *sharedEntry) {
 	}
 }
 
+func (e *sharedEntry) clearSessionLocked() {
+	e.stopIdleReaperLocked()
+	e.session = nil
+}
+
+func (e *sharedEntry) stopIdleReaperLocked() {
+	if e.reaperCancel != nil {
+		e.reaperCancel()
+		e.reaperCancel = nil
+	}
+}
+
+func (e *sharedEntry) startIdleReaperLocked(k sessionKey, session *muxSession, idleTimeout time.Duration) {
+	e.stopIdleReaperLocked()
+	if session == nil || idleTimeout <= 0 {
+		return
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	e.reaperCancel = cancel
+	go e.reapIdleSession(ctx, k, session, idleTimeout)
+}
+
+func (e *sharedEntry) reapIdleSession(ctx context.Context, k sessionKey, session *muxSession, idleTimeout time.Duration) {
+	ticker := time.NewTicker(muxIdleCheckInterval(idleTimeout))
+	defer ticker.Stop()
+
+	var idleSince time.Time
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		e.mu.Lock()
+		if e.session != session {
+			e.mu.Unlock()
+			return
+		}
+		if session.IsClosed() {
+			e.clearSessionLocked()
+			e.mu.Unlock()
+			dropSharedEntry(k, e)
+			return
+		}
+		if session.NumStreams() > 0 {
+			idleSince = time.Time{}
+			e.mu.Unlock()
+			continue
+		}
+		now := time.Now()
+		if idleSince.IsZero() {
+			idleSince = now
+			e.mu.Unlock()
+			continue
+		}
+		if now.Sub(idleSince) < idleTimeout {
+			e.mu.Unlock()
+			continue
+		}
+
+		_ = session.Close()
+		e.clearSessionLocked()
+		e.mu.Unlock()
+		dropSharedEntry(k, e)
+		return
+	}
+}
+
+func muxIdleCheckInterval(idleTimeout time.Duration) time.Duration {
+	interval := idleTimeout / 2
+	if interval < 10*time.Millisecond {
+		return 10 * time.Millisecond
+	}
+	if interval > time.Second {
+		return time.Second
+	}
+	return interval
+}

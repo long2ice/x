@@ -86,7 +86,7 @@ func (d *relayxDialer) Dial(ctx context.Context, addr string, opts ...dialer.Dia
 	defer entry.mu.Unlock()
 
 	if entry.session != nil && entry.session.IsClosed() {
-		entry.session = nil
+		entry.clearSessionLocked()
 	}
 	if entry.session == nil {
 		conn, err := d.dialRaw(ctx, addr, opts...)
@@ -157,7 +157,7 @@ func (d *relayxDialer) Handshake(ctx context.Context, conn net.Conn, opts ...dia
 		cc, err := session.GetConn()
 		if err != nil {
 			session.Close()
-			entry.session = nil
+			entry.clearSessionLocked()
 			dropSharedEntry(key, entry)
 			return nil, err
 		}
@@ -167,7 +167,7 @@ func (d *relayxDialer) Handshake(ctx context.Context, conn net.Conn, opts ...dia
 	tunnel, muxNegotiated, err := d.doHandshake(ctx, conn, hopts, true)
 	if err != nil {
 		conn.Close()
-		entry.session = nil
+		entry.clearSessionLocked()
 		dropSharedEntry(key, entry)
 		return nil, err
 	}
@@ -175,7 +175,7 @@ func (d *relayxDialer) Handshake(ctx context.Context, conn net.Conn, opts ...dia
 	if !muxNegotiated {
 		// Peer does not speak mux; use this conn single-shot and forget the
 		// shared entry so the next caller opens a fresh TCP.
-		entry.session = nil
+		entry.clearSessionLocked()
 		dropSharedEntry(key, entry)
 		return tunnel, nil
 	}
@@ -183,16 +183,17 @@ func (d *relayxDialer) Handshake(ctx context.Context, conn net.Conn, opts ...dia
 	s, err := mux.ClientSession(tunnel, d.md.muxCfg)
 	if err != nil {
 		tunnel.Close()
-		entry.session = nil
+		entry.clearSessionLocked()
 		dropSharedEntry(key, entry)
 		return nil, err
 	}
 	session.session = s
+	entry.startIdleReaperLocked(key, session, d.md.muxIdleTimeout)
 
 	cc, err := session.GetConn()
 	if err != nil {
 		session.Close()
-		entry.session = nil
+		entry.clearSessionLocked()
 		dropSharedEntry(key, entry)
 		return nil, err
 	}
@@ -347,4 +348,3 @@ var defaultUserAgents = []string{
 	// Safari
 	"Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.4 Safari/605.1.15",
 }
-
