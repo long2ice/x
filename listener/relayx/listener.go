@@ -136,11 +136,14 @@ func (l *relayxListener) Init(m md.Metadata) error {
 	}
 	ln = proxyproto.WrapListener(l.options.ProxyProtocol, ln, 10*time.Second)
 	ln = metrics.WrapListener(l.options.Service, ln)
-	ln = stats.WrapListener(ln, l.options.Stats)
 	ln = admission.WrapListener(l.options.Service, l.options.Admission, ln)
 	ln = limiter_wrapper.WrapListener(l.options.Service, ln, l.options.TrafficLimiter)
-	ln = climiter.WrapListener(l.options.ConnLimiter, ln)
 	ln = xtls.NewListener(ln, l.options.TLSConfig)
+	// NOTE: stats and conn-limiter wrapping intentionally happen in Accept()
+	// at the user-conn level (per smux stream / per WebSocket tunnel), NOT at
+	// this TCP listener level. Wrapping here would count smux session-level
+	// NOP keepalive frames as user traffic and keep the client IP "active"
+	// after all user streams have closed.
 
 	l.addr = ln.Addr()
 	go func() {
@@ -157,6 +160,22 @@ func (l *relayxListener) Accept() (conn net.Conn, err error) {
 	var ok bool
 	select {
 	case conn = <-l.cqueue:
+		// Apply per-IP conn limiter at the user-conn level (per stream /
+		// per single-shot tunnel). When the quota is exhausted, the conn is
+		// closed; subsequent Read/Write by the handler will return an error.
+		if l.options.ConnLimiter != nil {
+			host, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
+			if lim := l.options.ConnLimiter.Limiter(host); lim != nil {
+				if lim.Allow(1) {
+					conn = climiter.WrapConn(lim, conn)
+				} else {
+					conn.Close()
+				}
+			}
+		}
+		// Count user bytes only (smux NOP keepalive on the underlying TCP
+		// session is excluded because it never reaches this layer).
+		conn = stats.WrapConn(conn, l.options.Stats)
 		conn = limiter_wrapper.WrapConn(
 			conn,
 			l.options.TrafficLimiter,

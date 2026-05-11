@@ -30,13 +30,6 @@ func PipeIdle(ctx context.Context, rw1, rw2 io.ReadWriteCloser, idleTimeout time
 }
 
 func pipe(ctx context.Context, rw1, rw2 io.ReadWriteCloser, idle time.Duration) error {
-	// subctx is cancelled when either goroutine finishes, so the surviving
-	// goroutine is force-closed rather than left running indefinitely.
-	// This fixes the case where a Windows client sends TCP FIN (graceful close):
-	// the OS-level TCP stack keeps ACKing inbound data, so writes to the
-	// "closed" connection keep succeeding and the other goroutine never exits.
-	subctx, cancel := context.WithCancel(ctx)
-
 	wg := sync.WaitGroup{}
 	wg.Add(2)
 
@@ -44,14 +37,12 @@ func pipe(ctx context.Context, rw1, rw2 io.ReadWriteCloser, idle time.Duration) 
 
 	go func() {
 		defer wg.Done()
-		defer cancel()
 		if err := pipeBuffer(rw1, rw2, bufferSize/2, idle); err != nil {
 			ch <- err
 		}
 	}()
 	go func() {
 		defer wg.Done()
-		defer cancel()
 		if err := pipeBuffer(rw2, rw1, bufferSize/2, idle); err != nil {
 			ch <- err
 		}
@@ -65,16 +56,12 @@ func pipe(ctx context.Context, rw1, rw2 io.ReadWriteCloser, idle time.Duration) 
 
 	select {
 	case <-done:
-	case <-subctx.Done():
-		// Force-close both sides so both goroutines exit promptly.
+	case <-ctx.Done():
+		// Force-close so the pipe goroutines exit promptly instead of
+		// waiting up to idleTimeout / TCP keepalive for the next Read.
 		rw1.Close()
 		rw2.Close()
-		if ctx.Err() != nil {
-			// Outer context cancelled (service shutdown) — treat as clean exit.
-			return nil
-		}
-		// One goroutine finished naturally; wait for the other to exit after force-close.
-		<-done
+		return nil
 	}
 
 	select {
