@@ -16,6 +16,7 @@ import (
 	md "github.com/go-gost/core/metadata"
 	"github.com/go-gost/core/recorder"
 	"github.com/go-gost/go-shadowsocks2/core"
+	"github.com/go-gost/go-shadowsocks2/socks"
 	"github.com/go-gost/go-shadowsocks2/utils"
 	xctx "github.com/go-gost/x/ctx"
 	ictx "github.com/go-gost/x/internal/ctx"
@@ -253,14 +254,20 @@ func (h *ssuHandler) relayPacketUDP(ctx context.Context, src net.PacketConn, ro 
 		if err != nil {
 			return err
 		}
-		session, payload, err := h.udpServer.Inbound(b[:n], clientAddr)
+		session, target, payload, err := h.udpServer.Inbound(b[:n], clientAddr)
 		if err != nil {
 			return err
 		}
 
-		targetAddr, err := net.ResolveUDPAddr("udp", session.Target().String())
-		if err != nil {
-			log.Warnf("invalid target address from %s: %v", addr, err)
+		// AEAD SS UDP carries the target inside every packet; use the per-packet
+		// target returned by Inbound. session.Target() caches the first packet's
+		// target per clientAddr and is wrong for clients that fan out to
+		// multiple destinations from the same source port (WebRTC, SOCKS5 UDP
+		// relay, etc.).
+		targetAddr, err := net.ResolveUDPAddr("udp", target.String())
+		if err != nil || targetAddr.IP == nil || targetAddr.Port == 0 {
+			log.Warnf("invalid target address from %s: target=%q err=%v",
+				addr, target.String(), err)
 			continue
 		}
 		if ro.Host == "" {
@@ -313,7 +320,24 @@ func (h *ssuHandler) relayPacketUDP(ctx context.Context, src net.PacketConn, ro 
 						log.Warn("bypass: ", raddr)
 						return
 					}
-					encrypted, err := h.udpServer.Outbound(b[:n], session)
+					// SS UDP reply format: [salt][AEAD(ATYP+ADDR+PORT+DATA)]
+					// where ADDR+PORT is the source of the reply. The
+					// go-shadowsocks2 AEAD Outbound only encrypts the
+					// plaintext as-is, so the target prefix has to be
+					// prepended here before encryption.
+					srcAddr := socks.ParseAddr(raddr.String())
+					if srcAddr == nil {
+						log.Warnf("invalid reply source: %v", raddr)
+						continue
+					}
+					plaintext := make([]byte, 0, len(srcAddr)+n)
+					plaintext = append(plaintext, srcAddr...)
+					plaintext = append(plaintext, b[:n]...)
+					encrypted, err := h.udpServer.Outbound(plaintext, session)
+					if err != nil {
+						log.Warnf("failed to encrypt response from %v: %v", raddr, err)
+						return
+					}
 					if _, err = src.WriteTo(encrypted, net.UDPAddrFromAddrPort(clientAddr)); err != nil {
 						log.Warnf("failed to write response to %v: %v", clientAddr, err)
 						return

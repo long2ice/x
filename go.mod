@@ -132,4 +132,4 @@ replace github.com/ugorji/go v1.1.4 => github.com/ugorji/go/codec v1.2.12
 
 replace github.com/go-gost/core => github.com/long2ice/core v0.0.0-20251204121945-3894c0a44d61
 
-replace github.com/go-gost/go-shadowsocks2 => github.com/long2ice/go-shadowsocks2 v0.0.0-20260319114927-cff20912f60a
+replace github.com/go-gost/go-shadowsocks2 => github.com/long2ice/go-shadowsocks2 v0.0.0-20260511103801-b3b377f7d32b
