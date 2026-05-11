@@ -350,7 +350,13 @@ func (h *ssuHandler) relayPacketUDP(ctx context.Context, src net.PacketConn, ro 
 		}
 
 		if n, err = dstConn.(net.PacketConn).WriteTo(payload, targetAddr); err != nil {
-			return err
+			// Don't tear down the entire per-client relay on a single
+			// unreachable destination: WebRTC / fanout clients commonly
+			// probe many targets from one source port (e.g. an IPv6 STUN
+			// on a v4-only in-node returns ENETUNREACH), and killing the
+			// handler here would drop in-flight IPv4 traffic too.
+			log.Warnf("forward to %s failed: %v", targetAddr, err)
+			continue
 		}
 
 		log.Tracef("%s >>> %s data: %d",
