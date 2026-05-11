@@ -32,6 +32,7 @@ import (
 	ws_util "github.com/go-gost/x/internal/util/ws"
 	"github.com/go-gost/x/internal/util/wspad"
 	climiter "github.com/go-gost/x/limiter/conn/wrapper"
+	traffic_limiter "github.com/go-gost/x/limiter/traffic"
 	limiter_wrapper "github.com/go-gost/x/limiter/traffic/wrapper"
 	metrics "github.com/go-gost/x/metrics/wrapper"
 	stats "github.com/go-gost/x/observer/stats/wrapper"
@@ -135,15 +136,13 @@ func (l *relayxListener) Init(m md.Metadata) error {
 		return err
 	}
 	ln = proxyproto.WrapListener(l.options.ProxyProtocol, ln, 10*time.Second)
-	ln = metrics.WrapListener(l.options.Service, ln)
 	ln = admission.WrapListener(l.options.Service, l.options.Admission, ln)
-	ln = limiter_wrapper.WrapListener(l.options.Service, ln, l.options.TrafficLimiter)
 	ln = xtls.NewListener(ln, l.options.TLSConfig)
-	// NOTE: stats and conn-limiter wrapping intentionally happen in Accept()
-	// at the user-conn level (per smux stream / per WebSocket tunnel), NOT at
-	// this TCP listener level. Wrapping here would count smux session-level
-	// NOP keepalive frames as user traffic and keep the client IP "active"
-	// after all user streams have closed.
+	// NOTE: accounting and conn-limiter wrapping intentionally happen in
+	// Accept() at the user-conn level (per smux stream / per WebSocket
+	// tunnel), NOT at this TCP listener level. Wrapping here would count smux
+	// session-level NOP keepalive frames as user traffic and keep the client IP
+	// "active" after all user streams have closed.
 
 	l.addr = ln.Addr()
 	go func() {
@@ -175,7 +174,16 @@ func (l *relayxListener) Accept() (conn net.Conn, err error) {
 		}
 		// Count user bytes only (smux NOP keepalive on the underlying TCP
 		// session is excluded because it never reaches this layer).
+		conn = metrics.WrapConn(l.options.Service, conn)
 		conn = stats.WrapConn(conn, l.options.Stats)
+		conn = limiter_wrapper.WrapConn(
+			conn,
+			l.options.TrafficLimiter,
+			traffic_limiter.ServiceLimitKey,
+			limiter.ScopeOption(limiter.ScopeService),
+			limiter.ServiceOption(l.options.Service),
+			limiter.NetworkOption(conn.LocalAddr().Network()),
+		)
 		conn = limiter_wrapper.WrapConn(
 			conn,
 			l.options.TrafficLimiter,

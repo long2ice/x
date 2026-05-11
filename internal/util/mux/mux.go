@@ -149,6 +149,26 @@ func (c *streamConn) Close() error {
 	return c.stream.Close()
 }
 
+// SetDeadline / SetReadDeadline / SetWriteDeadline must delegate to the smux
+// stream, not the underlying TCP conn. Without this override the promoted
+// net.Conn methods set deadlines on the shared TCP session, which has no
+// effect on the per-stream Read/Write (smux Stream.Read selects on its own
+// deadline timer). This caused pipeBuffer's 10-second TCP half-close timeout
+// to be a no-op for smux streams, leaking pipe goroutines indefinitely when
+// one direction never returned EOF (e.g. Windows clients abandoning the
+// connection without the TCP stack delivering FIN).
+func (c *streamConn) SetDeadline(t time.Time) error {
+	return c.stream.SetDeadline(t)
+}
+
+func (c *streamConn) SetReadDeadline(t time.Time) error {
+	return c.stream.SetReadDeadline(t)
+}
+
+func (c *streamConn) SetWriteDeadline(t time.Time) error {
+	return c.stream.SetWriteDeadline(t)
+}
+
 func (c *streamConn) Context() context.Context {
 	if sc, ok := c.Conn.(ctx.Context); ok {
 		return sc.Context()
