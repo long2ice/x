@@ -15,6 +15,7 @@ import (
 	mdata "github.com/go-gost/core/metadata"
 	ictx "github.com/go-gost/x/internal/ctx"
 	tun_util "github.com/go-gost/x/internal/util/tun"
+	wgutil "github.com/go-gost/x/internal/util/wireguard"
 	traffic_limiter "github.com/go-gost/x/limiter/traffic"
 	limiter_wrapper "github.com/go-gost/x/limiter/traffic/wrapper"
 	mdx "github.com/go-gost/x/metadata"
@@ -43,7 +44,7 @@ type wgListener struct {
 	md      metadata
 	options listener.Options
 
-	dev      *wgDevice
+	dev      *wgutil.Device
 	wgDev    *wgdevice.Device
 	closeWG  sync.Once
 	stopOnce sync.Once
@@ -70,7 +71,7 @@ func (l *wgListener) Init(md mdata.Metadata) error {
 		return err
 	}
 	l.port = port
-	l.addr = &addr{name: l.options.Addr}
+	l.addr = &wgutil.Addr{Name: l.options.Addr}
 
 	l.cqueue = make(chan net.Conn, 1)
 	l.closed = make(chan struct{})
@@ -87,15 +88,7 @@ func (l *wgListener) Init(md mdata.Metadata) error {
 		"config": &tun_util.Config{MTU: l.md.mtu},
 	}))
 
-	var c net.Conn = &conn{
-		dev:     dev,
-		wgDev:   wgDev,
-		laddr:   l.addr,
-		raddr:   l.addr,
-		ctx:     ctx,
-		cancel:  cancel,
-		onClose: l.shutdownDevice,
-	}
+	var c net.Conn = wgutil.NewConn(dev, wgDev, l.addr, l.addr, ctx, cancel, l.shutdownDevice)
 	c = metrics.WrapConn(l.options.Service, c)
 	c = stats.WrapConn(c, l.options.Stats)
 	c = limiter_wrapper.WrapConn(
@@ -111,7 +104,7 @@ func (l *wgListener) Init(md mdata.Metadata) error {
 	return nil
 }
 
-func (l *wgListener) createDeviceWithRetry() (*wgDevice, *wgdevice.Device, error) {
+func (l *wgListener) createDeviceWithRetry() (*wgutil.Device, *wgdevice.Device, error) {
 	var lastErr error
 	for i := 0; i < bindRetries; i++ {
 		select {
@@ -138,9 +131,9 @@ func (l *wgListener) createDeviceWithRetry() (*wgDevice, *wgdevice.Device, error
 	return nil, nil, lastErr
 }
 
-func (l *wgListener) createDevice() (*wgDevice, *wgdevice.Device, error) {
-	dev := newWGDevice("wg0", l.md.mtu, l.md.queueLen)
-	wgDev := wgdevice.NewDevice(dev, wgconn.NewDefaultBind(), newWGLogger(l.log, l.md.logLevel))
+func (l *wgListener) createDevice() (*wgutil.Device, *wgdevice.Device, error) {
+	dev := wgutil.NewDevice("wg0", l.md.mtu, l.md.queueLen)
+	wgDev := wgdevice.NewDevice(dev, wgconn.NewDefaultBind(), wgutil.NewLogger(l.log, l.md.logLevel))
 
 	if err := wgDev.IpcSet(l.buildUAPIConfig()); err != nil {
 		wgDev.Close()
@@ -186,24 +179,6 @@ func (l *wgListener) buildUAPIConfig() string {
 		}
 	}
 	return b.String()
-}
-
-func newWGLogger(log logger.Logger, level string) *wgdevice.Logger {
-	lg := &wgdevice.Logger{
-		Verbosef: wgdevice.DiscardLogf,
-		Errorf:   wgdevice.DiscardLogf,
-	}
-	if log == nil {
-		return lg
-	}
-	switch level {
-	case "verbose", "debug", "trace":
-		lg.Verbosef = func(format string, args ...any) { log.Debugf(format, args...) }
-		lg.Errorf = func(format string, args ...any) { log.Errorf(format, args...) }
-	case "error", "":
-		lg.Errorf = func(format string, args ...any) { log.Errorf(format, args...) }
-	}
-	return lg
 }
 
 func (l *wgListener) Accept() (net.Conn, error) {

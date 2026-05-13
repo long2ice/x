@@ -1,12 +1,11 @@
 package wireguard
 
 import (
-	"encoding/base64"
-	"encoding/hex"
 	"fmt"
 	"strings"
 
 	mdata "github.com/go-gost/core/metadata"
+	wgutil "github.com/go-gost/x/internal/util/wireguard"
 	mdutil "github.com/go-gost/x/metadata/util"
 )
 
@@ -36,7 +35,7 @@ func (l *wgListener) parseMetadata(md mdata.Metadata) error {
 	if pk == "" {
 		return fmt.Errorf("wireguard: privateKey is required")
 	}
-	pkHex, err := keyToHex(pk)
+	pkHex, err := wgutil.KeyToHex(pk)
 	if err != nil {
 		return fmt.Errorf("wireguard: invalid privateKey: %w", err)
 	}
@@ -84,7 +83,7 @@ func parsePeers(md mdata.Metadata) ([]peerConfig, error) {
 		if pubRaw == "" {
 			return nil, fmt.Errorf("wireguard: peers[%d] missing publicKey", i)
 		}
-		pubHex, err := keyToHex(pubRaw)
+		pubHex, err := wgutil.KeyToHex(pubRaw)
 		if err != nil {
 			return nil, fmt.Errorf("wireguard: peers[%d] invalid publicKey: %w", i, err)
 		}
@@ -92,7 +91,7 @@ func parsePeers(md mdata.Metadata) ([]peerConfig, error) {
 		p := peerConfig{publicKey: pubHex}
 
 		if psk, _ := m["presharedKey"].(string); psk != "" {
-			pskHex, err := keyToHex(psk)
+			pskHex, err := wgutil.KeyToHex(psk)
 			if err != nil {
 				return nil, fmt.Errorf("wireguard: peers[%d] invalid presharedKey: %w", i, err)
 			}
@@ -133,23 +132,4 @@ func parsePeers(md mdata.Metadata) ([]peerConfig, error) {
 		peers = append(peers, p)
 	}
 	return peers, nil
-}
-
-// keyToHex accepts a WireGuard key in either base64 (44 chars) or hex (64
-// chars) form and returns the hex form expected by wireguard-go's UAPI.
-func keyToHex(s string) (string, error) {
-	s = strings.TrimSpace(s)
-	if len(s) == 64 {
-		if _, err := hex.DecodeString(s); err == nil {
-			return strings.ToLower(s), nil
-		}
-	}
-	b, err := base64.StdEncoding.DecodeString(s)
-	if err != nil {
-		return "", err
-	}
-	if len(b) != 32 {
-		return "", fmt.Errorf("expected 32-byte key, got %d", len(b))
-	}
-	return hex.EncodeToString(b), nil
 }
