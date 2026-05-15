@@ -19,6 +19,11 @@ type metadata struct {
 
 	mux    bool
 	muxCfg *mux.Config
+
+	// wspad toggles the WebSocket padding obfuscation layer on the outgoing
+	// session. Both peers MUST agree: configure the same value on the matching
+	// listener or the wire format will not line up.
+	wspad bool
 }
 
 const defaultMuxIdleTimeout = 30 * time.Second
@@ -37,6 +42,12 @@ func (d *relayxDialer) parseMetadata(md mdata.Metadata) error {
 		d.md.mux = mdutil.GetBool(md, "mux")
 	} else {
 		d.md.mux = true
+	}
+
+	if mdutil.IsExists(md, "wspad") {
+		d.md.wspad = mdutil.GetBool(md, "wspad")
+	} else {
+		d.md.wspad = true
 	}
 	if mdutil.IsExists(md, "mux.idleTimeout", "mux.idle.timeout") {
 		d.md.muxIdleTimeout = mdutil.GetDuration(md, "mux.idleTimeout", "mux.idle.timeout")

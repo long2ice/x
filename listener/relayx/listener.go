@@ -289,7 +289,12 @@ func (l *relayxListener) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		baseCtx = xctx.ContextWithSrcAddr(baseCtx, &net.TCPAddr{IP: clientIP})
 	}
 
-	tunnel := wspad.Conn(ws_util.ContextConn(baseCtx, wsConn))
+	var tunnel net.Conn
+	if l.md.wspad {
+		tunnel = wspad.Conn(ws_util.ContextConn(baseCtx, wsConn))
+	} else {
+		tunnel = ws_util.ContextConn(baseCtx, wsConn)
+	}
 
 	muxSignal := make([]byte, minResponseBodySize+randIntn(maxResponseBodySize-minResponseBodySize+1))
 	if _, err := crand.Read(muxSignal); err != nil {

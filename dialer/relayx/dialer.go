@@ -257,7 +257,12 @@ func (d *relayxDialer) doHandshake(ctx context.Context, conn net.Conn, hopts *di
 	}
 	resp.Body.Close()
 
-	tunnel := wspad.Conn(ws_util.Conn(wsConn))
+	var tunnel net.Conn
+	if d.md.wspad {
+		tunnel = wspad.Conn(ws_util.Conn(wsConn))
+	} else {
+		tunnel = ws_util.Conn(wsConn)
+	}
 
 	muxBuf := make([]byte, 4096)
 	n, err := tunnel.Read(muxBuf)
