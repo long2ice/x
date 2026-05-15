@@ -30,21 +30,45 @@ import (
 const (
 	headerSize       = 2
 	maxRealPerFrame  = 0xFFFF // uint16 cap per padded frame
-	upgradeBucketP   = 3      // 30% chance to upgrade to the next bucket
-	upgradeBucketBN  = 10
-	largeUnpadCutoff = 16384 // payloads larger than this are sent without padding
+	largeUnpadCutoff = 16384  // payloads larger than this are sent without padding
+
+	defaultUpgradeBucketP  = 3 // 30% chance to upgrade to the next bucket
+	defaultUpgradeBucketBN = 10
 )
 
-// sizeBuckets are the target frame sizes (including 2-byte header).
-// 256 / 1024 / 4096 / 16384 — chosen to span the typical inner-frame range.
-var sizeBuckets = [...]int{256, 1024, 4096, 16384}
-
-// Conn wraps a WebsocketConn with a padding layer. The returned net.Conn
-// reads and writes plaintext bytes; the wire carries padded WS messages.
+// Bucket policies — only the write side picks a target frame size; the read
+// side accepts any padding amount because the wire format is self-describing.
 //
-// Both peers MUST use this wrapper or wire-incompatible.
+//   - defaultBuckets: balanced anti-DPI, used by Conn().
+//   - lightBuckets:    pad as little as possible (server→client direction).
+//   - heavyBuckets:    force every padded frame ≥ 4 KiB (client→server direction).
+var (
+	defaultBuckets = []int{256, 1024, 4096, 16384}
+	lightBuckets   = []int{2, 64, 256, 16384}
+	heavyBuckets   = []int{4096, 8192, 16384}
+)
+
+// Conn wraps a WebsocketConn with the default symmetric padding layer.
+// Both peers MUST use a wspad wrapper or the wire format will not line up.
 func Conn(c ws_util.WebsocketConn) net.Conn {
-	return &paddedConn{ws: c}
+	return newPaddedConn(c, defaultBuckets, defaultUpgradeBucketP)
+}
+
+// ListenerConn pads server→client frames into a tight bucket set, so the
+// listener side contributes minimal extra bytes. Pair with DialerConn on the
+// dialer side to skew total bytes toward the client→server direction. The
+// reader logic is identical, so light/heavy peers remain wire-compatible.
+func ListenerConn(c ws_util.WebsocketConn) net.Conn {
+	// Never upgrade — keep listener-side padding strictly minimal.
+	return newPaddedConn(c, lightBuckets, 0)
+}
+
+// DialerConn pads client→server frames into a heavy bucket set, always
+// upgrading to the next bucket size. Combined with ListenerConn this makes
+// the dialer side carry the bulk of padding overhead.
+func DialerConn(c ws_util.WebsocketConn) net.Conn {
+	// Force upgrade (probability >= 1) so heavy padding is deterministic.
+	return newPaddedConn(c, heavyBuckets, defaultUpgradeBucketBN)
 }
 
 type paddedConn struct {
@@ -54,6 +78,14 @@ type paddedConn struct {
 	readBuf []byte // bytes from current message not yet returned to caller
 
 	wmu sync.Mutex
+
+	// Per-instance bucket policy for writeFrame. Read path is policy-agnostic.
+	buckets   []int
+	upgradeP  int // numerator out of defaultUpgradeBucketBN
+}
+
+func newPaddedConn(c ws_util.WebsocketConn, buckets []int, upgradeP int) *paddedConn {
+	return &paddedConn{ws: c, buckets: buckets, upgradeP: upgradeP}
 }
 
 func (c *paddedConn) Read(b []byte) (int, error) {
@@ -115,7 +147,7 @@ func (c *paddedConn) writeFrame(b []byte) error {
 	if needed > largeUnpadCutoff {
 		target = needed // do not pad very large frames
 	} else {
-		target = chooseBucket(needed)
+		target = c.chooseBucket(needed)
 	}
 
 	frame := make([]byte, target)
@@ -129,11 +161,11 @@ func (c *paddedConn) writeFrame(b []byte) error {
 	return c.ws.WriteMessage(websocket.BinaryMessage, frame)
 }
 
-func chooseBucket(needed int) int {
-	for i, b := range sizeBuckets {
+func (c *paddedConn) chooseBucket(needed int) int {
+	for i, b := range c.buckets {
 		if b >= needed {
-			if i+1 < len(sizeBuckets) && rand.IntN(upgradeBucketBN) < upgradeBucketP {
-				return sizeBuckets[i+1]
+			if i+1 < len(c.buckets) && c.upgradeP > 0 && rand.IntN(defaultUpgradeBucketBN) < c.upgradeP {
+				return c.buckets[i+1]
 			}
 			return b
 		}

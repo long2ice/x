@@ -291,7 +291,10 @@ func (l *relayxListener) serveHTTP(w http.ResponseWriter, r *http.Request) {
 
 	var tunnel net.Conn
 	if l.md.wspad {
-		tunnel = wspad.Conn(ws_util.ContextConn(baseCtx, wsConn))
+		// Listener side uses the light bucket set so server→client frames
+		// carry minimal extra padding; the matching dialer uses heavy
+		// buckets, skewing padding overhead to the client→server direction.
+		tunnel = wspad.ListenerConn(ws_util.ContextConn(baseCtx, wsConn))
 	} else {
 		tunnel = ws_util.ContextConn(baseCtx, wsConn)
 	}

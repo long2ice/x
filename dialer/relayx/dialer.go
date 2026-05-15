@@ -259,7 +259,11 @@ func (d *relayxDialer) doHandshake(ctx context.Context, conn net.Conn, hopts *di
 
 	var tunnel net.Conn
 	if d.md.wspad {
-		tunnel = wspad.Conn(ws_util.Conn(wsConn))
+		// Dialer side uses the heavy bucket set so client→server frames
+		// always pay extra padding bytes; pair with ListenerConn on the
+		// peer to skew total bytes toward the inbound direction at the
+		// listener's vantage point.
+		tunnel = wspad.DialerConn(ws_util.Conn(wsConn))
 	} else {
 		tunnel = ws_util.Conn(wsConn)
 	}
