@@ -53,6 +53,11 @@ func (h *socks4Handler) parseMetadata(md mdata.Metadata) (err error) {
 
 	h.md.sniffing = mdutil.GetBool(md, "sniffing")
 	h.md.sniffingTimeout = mdutil.GetDuration(md, "sniffing.timeout")
+	if h.md.sniffingTimeout <= 0 {
+		// Server-first protocols (VNC, SMTP, MySQL, etc.) never send the
+		// first byte, so Peek would block forever and deadlock the dial.
+		h.md.sniffingTimeout = 500 * time.Millisecond
+	}
 	h.md.sniffingWebsocket = mdutil.GetBool(md, "sniffing.websocket")
 	h.md.sniffingWebsocketSampleRate = mdutil.GetFloat(md, "sniffing.websocket.sampleRate")
 
