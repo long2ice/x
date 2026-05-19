@@ -28,11 +28,6 @@ type metadata struct {
 
 	mux    bool
 	muxCfg *mux.Config
-
-	// wspad toggles the WebSocket padding obfuscation layer. Defaults to
-	// false; when true, every binary frame is padded per the listener-side
-	// linear policy (see wspad.ListenerConn). Both peers MUST agree.
-	wspad bool
 }
 
 var serverHeaderPool = []string{
@@ -87,7 +82,6 @@ func (l *relayxListener) parseMetadata(md mdata.Metadata) error {
 		l.md.mux = true
 	}
 
-	l.md.wspad = mdutil.GetBool(md, "wspad")
 	l.md.muxCfg = &mux.Config{
 		Version:           mdutil.GetInt(md, "mux.version"),
 		KeepAliveInterval: mdutil.GetDuration(md, "mux.keepaliveInterval"),

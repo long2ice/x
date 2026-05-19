@@ -23,7 +23,6 @@ import (
 	"github.com/go-gost/x/internal/net/proxyproto"
 	"github.com/go-gost/x/internal/util/mux"
 	ws_util "github.com/go-gost/x/internal/util/ws"
-	"github.com/go-gost/x/internal/util/wspad"
 	"github.com/go-gost/x/registry"
 	"github.com/gorilla/websocket"
 	utls "github.com/refraction-networking/utls"
@@ -257,15 +256,7 @@ func (d *relayxDialer) doHandshake(ctx context.Context, conn net.Conn, hopts *di
 	}
 	resp.Body.Close()
 
-	var tunnel net.Conn
-	if d.md.wspad {
-		// Dialer side uses the light bucket set so client→server frames
-		// stay small; pair with ListenerConn on the peer to skew total
-		// padding bytes toward the server→client direction.
-		tunnel = wspad.DialerConn(ws_util.Conn(wsConn))
-	} else {
-		tunnel = ws_util.Conn(wsConn)
-	}
+	tunnel := ws_util.Conn(wsConn)
 
 	muxBuf := make([]byte, 4096)
 	n, err := tunnel.Read(muxBuf)

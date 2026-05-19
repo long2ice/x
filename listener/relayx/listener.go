@@ -30,7 +30,6 @@ import (
 	"github.com/go-gost/x/internal/util/mux"
 	xtls "github.com/go-gost/x/internal/util/tls"
 	ws_util "github.com/go-gost/x/internal/util/ws"
-	"github.com/go-gost/x/internal/util/wspad"
 	climiter "github.com/go-gost/x/limiter/conn/wrapper"
 	traffic_limiter "github.com/go-gost/x/limiter/traffic"
 	limiter_wrapper "github.com/go-gost/x/limiter/traffic/wrapper"
@@ -289,16 +288,7 @@ func (l *relayxListener) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		baseCtx = xctx.ContextWithSrcAddr(baseCtx, &net.TCPAddr{IP: clientIP})
 	}
 
-	var tunnel net.Conn
-	if l.md.wspad {
-		// Listener side adds linear 10-15% padding to every frame, so the
-		// server→client direction carries a predictable byte surplus. The
-		// matching dialer uses tight bucket padding (negligible overhead),
-		// keeping the byte surplus skewed strictly toward this direction.
-		tunnel = wspad.ListenerConn(ws_util.ContextConn(baseCtx, wsConn))
-	} else {
-		tunnel = ws_util.ContextConn(baseCtx, wsConn)
-	}
+	tunnel := ws_util.ContextConn(baseCtx, wsConn)
 
 	muxSignal := make([]byte, minResponseBodySize+randIntn(maxResponseBodySize-minResponseBodySize+1))
 	if _, err := crand.Read(muxSignal); err != nil {
