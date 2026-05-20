@@ -10,16 +10,13 @@ import (
 
 const (
 	udpReadBuffer    = 2048
-	udpPeerInboxSize = 64
+	udpPeerInboxSize = 128
 )
 
-// udpPeerConn is the per-remote-addr net.Conn the listener feeds to the
-// shared OpenVPN tunnel driver. Inbound datagrams arrive through inbox
-// (filled by the listener's demux goroutine). Outbound writes go
-// directly to the shared UDP socket addressed to the peer.
-//
-// SetDeadline is sampled at the start of each Read; deadlines set while
-// a Read is already blocked do not take effect until the next Read.
+// udpPeerConn is the per-remote-address net.Conn the listener feeds to
+// the OpenVPN protocol driver. Inbound datagrams arrive through inbox
+// (filled by the listener demux); outbound writes go straight to the
+// shared UDP socket addressed to this peer.
 type udpPeerConn struct {
 	pc    net.PacketConn
 	addr  net.Addr
@@ -31,33 +28,9 @@ type udpPeerConn struct {
 	activityMu sync.Mutex
 	lastActive time.Time
 
-	doneMu        sync.Mutex
-	handshakeDone bool
-
 	closeOnce sync.Once
 	closed    chan struct{}
-
-	onClose func()
-}
-
-// markHandshakeDone signals that this peer has finished its OpenVPN-shape
-// handshake (including the post-handshake decoy). Until then, the idle
-// reaper skips it: the post-handshake sleep produces no inbound packets
-// for up to ~1.4s, which a short idle window would otherwise mistake for
-// an abandoned peer.
-func (p *udpPeerConn) markHandshakeDone() {
-	p.doneMu.Lock()
-	p.handshakeDone = true
-	p.doneMu.Unlock()
-	p.activityMu.Lock()
-	p.lastActive = time.Now()
-	p.activityMu.Unlock()
-}
-
-func (p *udpPeerConn) isHandshakeDone() bool {
-	p.doneMu.Lock()
-	defer p.doneMu.Unlock()
-	return p.handshakeDone
+	onClose   func()
 }
 
 func newUDPPeerConn(pc net.PacketConn, addr net.Addr, onClose func()) *udpPeerConn {
@@ -75,13 +48,12 @@ func (p *udpPeerConn) deliver(pkt []byte) {
 	p.activityMu.Lock()
 	p.lastActive = time.Now()
 	p.activityMu.Unlock()
-
 	select {
 	case p.inbox <- pkt:
 	case <-p.closed:
 	default:
-		// inbox full; drop. The reliability layer will retransmit if it
-		// was a control packet, and data-channel loss is tolerated.
+		// inbox full; drop. The reliability layer retransmits control
+		// packets, and data-channel loss is tolerated.
 	}
 }
 
@@ -106,14 +78,12 @@ func (p *udpPeerConn) Read(b []byte) (int, error) {
 		defer timer.Stop()
 		deadlineCh = timer.C
 	}
-
 	select {
 	case pkt, ok := <-p.inbox:
 		if !ok {
 			return 0, io.EOF
 		}
-		n := copy(b, pkt)
-		return n, nil
+		return copy(b, pkt), nil
 	case <-deadlineCh:
 		return 0, os.ErrDeadlineExceeded
 	case <-p.closed:

@@ -6,130 +6,149 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
-	"io"
-	"sync/atomic"
-	"time"
-
-	"golang.org/x/crypto/hkdf"
+	"fmt"
+	"strings"
 )
 
-const (
-	tlsCryptHMACSize    = 32
-	tlsCryptCipherIVLen = 16
-	tlsCryptHeaderLen   = 1 + 8 + 4 + 4 + tlsCryptHMACSize // 49
-)
-
-var (
-	ErrTLSCryptShort   = errors.New("openvpn: tls-crypt frame too short")
-	ErrTLSCryptHMAC    = errors.New("openvpn: tls-crypt HMAC mismatch")
-	ErrTLSCryptReplay  = errors.New("openvpn: tls-crypt replay detected")
-	ErrTLSCryptIDSpace = errors.New("openvpn: tls-crypt replay id exhausted")
-)
-
-// ControlCipher applies the tls-crypt wire silhouette to control packets:
-// inserts a 4B replay id + 4B net_time + 32B HMAC after the session id,
-// and AES-256-CTR-encrypts the body (everything past the session id).
+// tls-crypt wraps every control-channel packet with HMAC-SHA256
+// authentication and AES-256-CTR encryption, keyed by a 256-byte static
+// key shared out of band (the `<tls-crypt>` block in an .ovpn file).
 //
-// The wire layout — opcode|sid|replay|time|HMAC|ciphertext — matches what
-// DPI sees from OpenVPN tls-crypt. The keys and replay state are ours;
-// peers using this codec interoperate with each other, not with the
-// reference implementation.
-type ControlCipher struct {
-	ka       []byte // 32B HMAC-SHA256 key
-	ke       []byte // 32B AES-256 key
-	sendID   atomic.Uint32
-	replay   *ReplayWindow
-	timeFn   func() uint32
+// On-wire control packet under tls-crypt:
+//
+//	opcode|key_id   1B  ┐
+//	session_id      8B  ├ authenticated, cleartext (the "header")
+//	packet_id       4B  ├
+//	net_time        4B  ┘
+//	HMAC-SHA256     32B  tag over header+plaintext
+//	ciphertext      var  AES-256-CTR(plaintext), IV = tag[:16]
+const (
+	tlsCryptHeaderSize = 1 + SessionIDSize // opcode|kid + session id
+	tlsCryptPIDSize    = 4 + 4             // packet id + net time
+	tlsCryptTagSize    = sha256.Size
+
+	tlsCryptStaticKeySize = 256
+	tlsCryptKeySlotSize   = 128
+	tlsCryptCipherKeySize = 32
+	tlsCryptHMACKeySize   = 32
+)
+
+// TLSCrypt holds the directional cipher/HMAC keys derived from a static key.
+type TLSCrypt struct {
+	encryptCipherKey []byte
+	encryptHMACKey   []byte
+	decryptCipherKey []byte
+	decryptHMACKey   []byte
 }
 
-// NewControlCipher derives Ka and Ke from a shared secret via HKDF-SHA256
-// and returns a fresh cipher with its own replay window.
-func NewControlCipher(secret []byte) (*ControlCipher, error) {
-	if len(secret) == 0 {
-		return nil, errors.New("openvpn: control cipher secret empty")
+// NewTLSCrypt splits a 256-byte static key into directional keys. The
+// static key holds two 128-byte slots; `client` selects which slot is
+// used for sending vs receiving so the two ends mirror each other.
+func NewTLSCrypt(staticKey []byte, client bool) (*TLSCrypt, error) {
+	if len(staticKey) != tlsCryptStaticKeySize {
+		return nil, fmt.Errorf("openvpn: tls-crypt static key is %d bytes, want %d", len(staticKey), tlsCryptStaticKeySize)
 	}
-	ka := make([]byte, 32)
-	r := hkdf.New(sha256.New, secret, nil, []byte("openvpn-shape-control-hmac-v1"))
-	if _, err := io.ReadFull(r, ka); err != nil {
-		return nil, err
+	slot0 := staticKey[:tlsCryptKeySlotSize]
+	slot1 := staticKey[tlsCryptKeySlotSize:]
+	encrypt, decrypt := slot0, slot1
+	if client {
+		encrypt, decrypt = slot1, slot0
 	}
-	ke := make([]byte, 32)
-	r = hkdf.New(sha256.New, secret, nil, []byte("openvpn-shape-control-cipher-v1"))
-	if _, err := io.ReadFull(r, ke); err != nil {
-		return nil, err
-	}
-	return &ControlCipher{
-		ka:     ka,
-		ke:     ke,
-		replay: NewReplayWindow(),
-		timeFn: func() uint32 { return uint32(time.Now().Unix()) },
+	// Within a 128-byte slot: cipher key at [0:64], HMAC key at [64:128]
+	// (only the first 32 bytes of each are used for AES-256 / SHA-256).
+	return &TLSCrypt{
+		encryptCipherKey: cloneBytes(encrypt[:tlsCryptCipherKeySize]),
+		encryptHMACKey:   cloneBytes(encrypt[64 : 64+tlsCryptHMACKeySize]),
+		decryptCipherKey: cloneBytes(decrypt[:tlsCryptCipherKeySize]),
+		decryptHMACKey:   cloneBytes(decrypt[64 : 64+tlsCryptHMACKeySize]),
 	}, nil
 }
 
-// Wrap takes the plaintext bytes of an encoded ControlPacket (output of
-// ControlPacket.Encode) and returns the tls-crypt-shaped wire bytes.
-func (c *ControlCipher) Wrap(plain []byte) ([]byte, error) {
-	if len(plain) < 9 {
-		return nil, ErrTLSCryptShort
+// Wrap authenticates and encrypts one control packet. header is the
+// cleartext opcode|kid + session id; plaintext is the encoded body.
+func (c *TLSCrypt) Wrap(header []byte, packetID, unixTime uint32, plaintext []byte) ([]byte, error) {
+	if len(header) != tlsCryptHeaderSize {
+		return nil, fmt.Errorf("openvpn: tls-crypt header is %d bytes, want %d", len(header), tlsCryptHeaderSize)
 	}
-	id := c.sendID.Add(1)
-	if id == 0 {
-		return nil, ErrTLSCryptIDSpace
-	}
+	ad := make([]byte, 0, len(header)+tlsCryptPIDSize)
+	ad = append(ad, header...)
+	ad = binary.BigEndian.AppendUint32(ad, packetID)
+	ad = binary.BigEndian.AppendUint32(ad, unixTime)
 
-	body := plain[9:]
-	out := make([]byte, tlsCryptHeaderLen+len(body))
-	copy(out[:9], plain[:9]) // opcode|kid + sid
-	binary.BigEndian.PutUint32(out[9:13], id)
-	binary.BigEndian.PutUint32(out[13:17], c.timeFn())
-
-	mac := hmac.New(sha256.New, c.ka)
-	mac.Write(out[:17])
-	mac.Write(body)
-	tag := mac.Sum(nil)
-	copy(out[17:49], tag)
-
-	block, err := aes.NewCipher(c.ke)
+	tag := tlsCryptHMAC(c.encryptHMACKey, ad, plaintext)
+	ciphertext, err := aes256ctr(c.encryptCipherKey, tag[:aes.BlockSize], plaintext)
 	if err != nil {
 		return nil, err
 	}
-	stream := cipher.NewCTR(block, tag[:tlsCryptCipherIVLen])
-	stream.XORKeyStream(out[49:], body)
+	out := make([]byte, 0, len(ad)+len(tag)+len(ciphertext))
+	out = append(out, ad...)
+	out = append(out, tag...)
+	out = append(out, ciphertext...)
 	return out, nil
 }
 
-// Unwrap reverses Wrap. Returns the reconstructed encoded ControlPacket
-// (suitable for DecodeControlPacket). Rejects tampered packets and
-// replays.
-func (c *ControlCipher) Unwrap(wire []byte) ([]byte, error) {
-	if len(wire) < tlsCryptHeaderLen {
-		return nil, ErrTLSCryptShort
+// Unwrap reverses Wrap, returning the cleartext header and decrypted body.
+func (c *TLSCrypt) Unwrap(packet []byte) (header []byte, packetID, unixTime uint32, plaintext []byte, err error) {
+	if len(packet) < tlsCryptHeaderSize+tlsCryptPIDSize+tlsCryptTagSize {
+		return nil, 0, 0, nil, errors.New("openvpn: tls-crypt packet too short")
 	}
-	id := binary.BigEndian.Uint32(wire[9:13])
-	tag := wire[17:49]
-	ct := wire[49:]
+	adEnd := tlsCryptHeaderSize + tlsCryptPIDSize
+	tagEnd := adEnd + tlsCryptTagSize
+	ad := packet[:adEnd]
+	tag := packet[adEnd:tagEnd]
+	ciphertext := packet[tagEnd:]
 
-	block, err := aes.NewCipher(c.ke)
+	plaintext, err = aes256ctr(c.decryptCipherKey, tag[:aes.BlockSize], ciphertext)
+	if err != nil {
+		return nil, 0, 0, nil, err
+	}
+	if !hmac.Equal(tag, tlsCryptHMAC(c.decryptHMACKey, ad, plaintext)) {
+		return nil, 0, 0, nil, errors.New("openvpn: tls-crypt authentication failed")
+	}
+	header = cloneBytes(packet[:tlsCryptHeaderSize])
+	packetID = binary.BigEndian.Uint32(packet[tlsCryptHeaderSize : tlsCryptHeaderSize+4])
+	unixTime = binary.BigEndian.Uint32(packet[tlsCryptHeaderSize+4 : adEnd])
+	return header, packetID, unixTime, plaintext, nil
+}
+
+func tlsCryptHMAC(key []byte, parts ...[]byte) []byte {
+	mac := hmac.New(sha256.New, key)
+	for _, p := range parts {
+		_, _ = mac.Write(p)
+	}
+	return mac.Sum(nil)
+}
+
+func aes256ctr(key, iv, in []byte) ([]byte, error) {
+	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, err
 	}
-	body := make([]byte, len(ct))
-	stream := cipher.NewCTR(block, tag[:tlsCryptCipherIVLen])
-	stream.XORKeyStream(body, ct)
+	out := cloneBytes(in)
+	cipher.NewCTR(block, iv).XORKeyStream(out, out)
+	return out, nil
+}
 
-	mac := hmac.New(sha256.New, c.ka)
-	mac.Write(wire[:17])
-	mac.Write(body)
-	if !hmac.Equal(tag, mac.Sum(nil)) {
-		return nil, ErrTLSCryptHMAC
+// DecodeStaticKey parses an OpenVPN static key file (the hex body of a
+// `-----BEGIN OpenVPN Static key V1-----` block, or the inline
+// `<tls-crypt>` contents) into its 256 raw bytes.
+func DecodeStaticKey(block []byte) ([]byte, error) {
+	var hexLines []string
+	for _, raw := range strings.Split(string(block), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "-----") {
+			continue
+		}
+		hexLines = append(hexLines, line)
 	}
-	if !c.replay.Accept(id) {
-		return nil, ErrTLSCryptReplay
+	key, err := hex.DecodeString(strings.Join(hexLines, ""))
+	if err != nil {
+		return nil, fmt.Errorf("openvpn: decode static key: %w", err)
 	}
-
-	plain := make([]byte, 9+len(body))
-	copy(plain[:9], wire[:9])
-	copy(plain[9:], body)
-	return plain, nil
+	if len(key) != tlsCryptStaticKeySize {
+		return nil, fmt.Errorf("openvpn: static key is %d bytes, want %d", len(key), tlsCryptStaticKeySize)
+	}
+	return key, nil
 }
