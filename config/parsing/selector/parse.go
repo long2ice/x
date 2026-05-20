@@ -55,6 +55,8 @@ func ParseNodeSelector(cfg *config.SelectorConfig) selector.Selector[*chain.Node
 		strategy = xs.LeastConnStrategy[*chain.Node]()
 	case "leastlatency", "ll":
 		strategy = xs.LeastLatencyStrategy[*chain.Node]()
+	case "parallel":
+		strategy = xs.ParallelStrategy[*chain.Node]()
 	default:
 		strategy = xs.RoundRobinStrategy[*chain.Node]()
 	}
