@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"net"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/go-gost/core/observer/stats"
 	"github.com/go-gost/core/recorder"
 	"github.com/go-gost/go-shadowsocks2/core"
+	"github.com/go-gost/go-shadowsocks2/socks"
 	"github.com/go-gost/go-shadowsocks2/utils"
 	xctx "github.com/go-gost/x/ctx"
 	ictx "github.com/go-gost/x/internal/ctx"
@@ -139,7 +141,13 @@ func (h *ssHandler) Handle(ctx context.Context, conn net.Conn, opts ...handler.H
 	if err != nil {
 		return
 	}
-	target := wrappedConn.Target()
+	var target socks.Addr
+	if tc, ok := wrappedConn.(interface{ Target() socks.Addr }); ok {
+		target = tc.Target()
+	}
+	if len(target) == 0 {
+		return errors.New("ss: target not available")
+	}
 	conn = wrappedConn
 
 	conn.SetReadDeadline(time.Now().Add(h.md.readTimeout))
