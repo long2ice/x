@@ -89,21 +89,30 @@ func emitStats(ctx context.Context, s *defaultService) {
 		return
 	}
 	st := s.status.Stats()
-	if st == nil || !st.IsUpdated() {
+	if st == nil {
+		return
+	}
+
+	var currentClients []string
+	if s.options.clientCounter != nil {
+		currentClients = s.options.clientCounter.ClientIPs()
+	}
+
+	// Always emit when there are active clients so the backend Redis TTL
+	// doesn't expire while connections are still open but idle (no new bytes).
+	if !st.IsUpdated() && len(currentClients) == 0 {
 		return
 	}
 
 	ev := xstats.StatsEvent{
-		Kind:         "service",
-		Service:      s.name,
-		TotalConns:   st.Get(stats.KindTotalConns),
-		CurrentConns: st.Get(stats.KindCurrentConns),
-		InputBytes:   st.Get(stats.KindInputBytes),
-		OutputBytes:  st.Get(stats.KindOutputBytes),
-		TotalErrs:    st.Get(stats.KindTotalErrs),
-	}
-	if s.options.clientCounter != nil {
-		ev.CurrentClients = s.options.clientCounter.ClientIPs()
+		Kind:           "service",
+		Service:        s.name,
+		TotalConns:     st.Get(stats.KindTotalConns),
+		CurrentConns:   st.Get(stats.KindCurrentConns),
+		InputBytes:     st.Get(stats.KindInputBytes),
+		OutputBytes:    st.Get(stats.KindOutputBytes),
+		TotalErrs:      st.Get(stats.KindTotalErrs),
+		CurrentClients: currentClients,
 	}
 	s.options.observer.Observe(ctx, []observer.Event{ev})
 }
