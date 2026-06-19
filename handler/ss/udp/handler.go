@@ -276,9 +276,14 @@ func (h *ssuHandler) packetConnForSession(ctx context.Context, src net.PacketCon
 		b := make([]byte, bufSize)
 
 		for {
+			cc.SetReadDeadline(time.Now().Add(h.md.udpConnTTL))
 			n, raddr, err := cc.ReadFrom(b)
 			if err != nil {
-				log.Warnf("failed to read response: %v", err)
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					log.Debugf("udp conn idle timeout, closing: %v", cc.LocalAddr())
+				} else {
+					log.Warnf("failed to read response: %v", err)
+				}
 				return
 			}
 
