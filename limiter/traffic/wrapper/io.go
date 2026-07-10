@@ -1,7 +1,6 @@
 package wrapper
 
 import (
-	"bytes"
 	"context"
 	"io"
 
@@ -12,7 +11,6 @@ import (
 // readWriter is an io.ReadWriter with traffic limiter supported.
 type readWriter struct {
 	io.ReadWriter
-	rbuf    bytes.Buffer
 	limiter traffic.TrafficLimiter
 	opts    []limiter.Option
 	key     string
@@ -37,28 +35,12 @@ func (p *readWriter) Read(b []byte) (n int, err error) {
 		return p.ReadWriter.Read(b)
 	}
 
-	if p.rbuf.Len() > 0 {
-		burst := len(b)
-		if p.rbuf.Len() < burst {
-			burst = p.rbuf.Len()
-		}
-		lim := limiter.Wait(context.Background(), burst)
-		return p.rbuf.Read(b[:lim])
+	// Wait before reading so upstream backpressure engages immediately.
+	n = limiter.Wait(context.Background(), len(b))
+	if n <= 0 {
+		return 0, nil
 	}
-
-	nn, err := p.ReadWriter.Read(b)
-	if err != nil {
-		return nn, err
-	}
-
-	n = limiter.Wait(context.Background(), nn)
-	if n < nn {
-		if _, err = p.rbuf.Write(b[n:nn]); err != nil {
-			return 0, err
-		}
-	}
-
-	return
+	return p.ReadWriter.Read(b[:n])
 }
 
 func (p *readWriter) Write(b []byte) (n int, err error) {
