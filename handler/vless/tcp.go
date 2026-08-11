@@ -85,6 +85,7 @@ func (h *vlessHandler) handleTCP(ctx context.Context, conn net.Conn, network, ad
 			CertPool:            h.certPool,
 			MitmBypass:          h.md.mitmBypass,
 			ReadTimeout:         h.md.readTimeout,
+			IdleTimeout:         h.md.idleTimeout,
 		}
 
 		conn = xnet.NewReadWriteConn(br, conn, conn)
@@ -110,7 +111,7 @@ func (h *vlessHandler) handleTCP(ctx context.Context, conn net.Conn, network, ad
 
 	t := time.Now()
 	log.Infof("%s <-> %s", conn.RemoteAddr(), address)
-	xnet.Pipe(ctx, conn, cc)
+	xnet.PipeIdle(ctx, conn, cc, h.md.idleTimeout)
 	log.WithFields(map[string]any{
 		"duration": time.Since(t),
 	}).Infof("%s >-< %s", conn.RemoteAddr(), address)

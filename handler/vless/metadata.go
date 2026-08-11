@@ -15,6 +15,12 @@ import (
 type metadata struct {
 	users         map[string]string
 	readTimeout   time.Duration
+	// idleTimeout bounds how long a proxied TCP conn can sit fully idle
+	// before it is reclaimed. Proxy clients (e.g. video players opening a
+	// connection per media request) may keep finished conns open forever;
+	// without this bound they pile up until the kernel runs out of TCP
+	// memory.
+	idleTimeout   time.Duration
 	hash          string
 	enableUDP     bool
 	udpBufferSize int
@@ -41,6 +47,11 @@ func (h *vlessHandler) parseMetadata(md mdata.Metadata) (err error) {
 	h.md.readTimeout = mdutil.GetDuration(md, "readTimeout")
 	if h.md.readTimeout <= 0 {
 		h.md.readTimeout = 15 * time.Second
+	}
+
+	h.md.idleTimeout = mdutil.GetDuration(md, "idleTimeout")
+	if h.md.idleTimeout <= 0 {
+		h.md.idleTimeout = 5 * time.Minute
 	}
 
 	h.md.users = mdutil.GetStringMapString(md, "users")
