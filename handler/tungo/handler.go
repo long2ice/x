@@ -21,6 +21,7 @@ import (
 	"github.com/xjasonlyu/tun2socks/v2/core"
 	"github.com/xjasonlyu/tun2socks/v2/core/adapter"
 	"github.com/xjasonlyu/tun2socks/v2/core/option"
+	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 )
 
@@ -135,15 +136,15 @@ func (h *tungoHandler) Handle(ctx context.Context, conn net.Conn, opts ...handle
 	th.ProcessAsync()
 	defer th.Close()
 
-	var cOpts []option.Option
-	if h.md.tcpModerateReceiveBuffer {
-		cOpts = append(cOpts, option.WithTCPModerateReceiveBuffer(h.md.tcpModerateReceiveBuffer))
-	}
-	if h.md.tcpSendBufferSize > 0 {
-		cOpts = append(cOpts, option.WithTCPSendBufferSize(h.md.tcpSendBufferSize))
-	}
-	if h.md.tcpReceiveBufferSize > 0 {
-		cOpts = append(cOpts, option.WithTCPReceiveBufferSize(h.md.tcpReceiveBufferSize))
+	// These endpoints terminate TCP across the tunnel (WAN RTTs), so the
+	// buffer ceilings bound per-flow throughput at max/RTT. Range options
+	// (rather than tun2socks' fixed-Default variants) raise the Max so both
+	// sides' auto-tuning has room to grow; see metadata.go for the defaults.
+	cOpts := []option.Option{
+		option.WithTCPModerateReceiveBuffer(h.md.tcpModerateReceiveBuffer),
+		option.WithTCPSendBufferSizeRange(tcp.MinBufferSize, h.md.tcpSendBufferSize, h.md.tcpSendBufferMaxSize),
+		option.WithTCPReceiveBufferSizeRange(tcp.MinBufferSize, h.md.tcpReceiveBufferSize, h.md.tcpReceiveBufferMaxSize),
+		option.WithTCPCongestionControl(h.md.tcpCongestionControl),
 	}
 
 	stack, err := core.CreateStack(&core.Config{

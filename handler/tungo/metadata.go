@@ -12,6 +12,17 @@ import (
 
 const (
 	defaultBufferSize = 4096
+
+	// The gVisor TCP endpoints created here are not loopback-local: they
+	// terminate connections whose other end sits across the tunnel (WAN
+	// RTTs). Window = throughput × RTT, so the stock 1MB/4MB gvisor buffer
+	// limits cap a single flow at ~1MB/RTT. Start at 1MB and let both-side
+	// auto-tuning grow toward an 8MB ceiling (~14MB/s at 550ms RTT).
+	defaultTCPBufferSize    = 1 << 20
+	defaultTCPMaxBufferSize = 8 << 20
+
+	// cubic ramps far faster than tun2socks' default reno on long fat paths.
+	defaultTCPCongestionControl = "cubic"
 )
 
 type metadata struct {
@@ -42,8 +53,11 @@ type metadata struct {
 	ipv6 bool
 
 	tcpSendBufferSize        int
+	tcpSendBufferMaxSize     int
 	tcpReceiveBufferSize     int
+	tcpReceiveBufferMaxSize  int
 	tcpModerateReceiveBuffer bool
+	tcpCongestionControl     string
 }
 
 func (h *tungoHandler) parseMetadata(md mdata.Metadata) (err error) {
@@ -90,8 +104,33 @@ func (h *tungoHandler) parseMetadata(md mdata.Metadata) (err error) {
 	h.md.ipv6 = mdutil.GetBool(md, "ipv6")
 
 	h.md.tcpSendBufferSize = mdutil.GetInt(md, "tcpSendBufferSize", "tungo.tcpSendBufferSize")
+	if h.md.tcpSendBufferSize <= 0 {
+		h.md.tcpSendBufferSize = defaultTCPBufferSize
+	}
+	h.md.tcpSendBufferMaxSize = mdutil.GetInt(md, "tcpSendBufferMaxSize", "tungo.tcpSendBufferMaxSize")
+	if h.md.tcpSendBufferMaxSize <= 0 {
+		h.md.tcpSendBufferMaxSize = defaultTCPMaxBufferSize
+	}
 	h.md.tcpReceiveBufferSize = mdutil.GetInt(md, "tcpReceiveBufferSize", "tungo.tcpReceiveBufferSize")
-	h.md.tcpModerateReceiveBuffer = mdutil.GetBool(md, "tcpModerateReceiveBuffer", "tungo.tcpModerateReceiveBuffer")
+	if h.md.tcpReceiveBufferSize <= 0 {
+		h.md.tcpReceiveBufferSize = defaultTCPBufferSize
+	}
+	h.md.tcpReceiveBufferMaxSize = mdutil.GetInt(md, "tcpReceiveBufferMaxSize", "tungo.tcpReceiveBufferMaxSize")
+	if h.md.tcpReceiveBufferMaxSize <= 0 {
+		h.md.tcpReceiveBufferMaxSize = defaultTCPMaxBufferSize
+	}
+
+	// Default on: receive-window auto-tuning is what lets the window grow
+	// toward the max on long-RTT paths. Explicit metadata still wins.
+	h.md.tcpModerateReceiveBuffer = true
+	if md.IsExists("tcpModerateReceiveBuffer") || md.IsExists("tungo.tcpModerateReceiveBuffer") {
+		h.md.tcpModerateReceiveBuffer = mdutil.GetBool(md, "tcpModerateReceiveBuffer", "tungo.tcpModerateReceiveBuffer")
+	}
+
+	h.md.tcpCongestionControl = mdutil.GetString(md, "tcpCongestionControl", "tungo.tcpCongestionControl")
+	if h.md.tcpCongestionControl == "" {
+		h.md.tcpCongestionControl = defaultTCPCongestionControl
+	}
 
 	return
 }
