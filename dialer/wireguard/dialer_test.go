@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-gost/core/dialer"
 	corelistener "github.com/go-gost/core/listener"
+	net_dialer "github.com/go-gost/x/internal/net/dialer"
 	xlogger "github.com/go-gost/x/logger"
 	listenerpkg "github.com/go-gost/x/listener/wireguard"
 	xmd "github.com/go-gost/x/metadata"
@@ -46,6 +47,20 @@ func newKeypair(t *testing.T) keypair {
 // real wireguard dialer, then exchanges a handcrafted IPv4 UDP datagram each
 // way to prove the encrypted tunnel actually carries packets end to end.
 func TestDialListenerHandshakeAndIO(t *testing.T) {
+	testHandshakeAndIO(t)
+}
+
+// TestDialListenerHandshakeAndIOWithNetDialer runs the same exchange with a
+// NetDialer that has an interface bound, which forces the DialBind transport
+// path (the one rule-mode routing relies on to keep the tunnel's own UDP
+// packets out of the tunnel).
+func TestDialListenerHandshakeAndIOWithNetDialer(t *testing.T) {
+	testHandshakeAndIO(t, dialer.NetDialerDialOption(&net_dialer.Dialer{
+		Interface: "127.0.0.1",
+	}))
+}
+
+func testHandshakeAndIO(t *testing.T, dialOpts ...dialer.DialOption) {
 	server := newKeypair(t)
 	client := newKeypair(t)
 
@@ -94,7 +109,7 @@ func TestDialListenerHandshakeAndIO(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	cli, err := d.Dial(ctx, addrWithPort("127.0.0.1", port))
+	cli, err := d.Dial(ctx, addrWithPort("127.0.0.1", port), dialOpts...)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
