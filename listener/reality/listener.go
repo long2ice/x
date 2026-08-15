@@ -3,7 +3,9 @@ package reality
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/go-gost/core/listener"
@@ -23,6 +25,11 @@ func init() {
 
 type realityListener struct {
 	ln      net.Listener
+	cfg     *reality.Config
+	conns   chan net.Conn
+	done    chan struct{}
+	err     error
+	closed  sync.Once
 	logger  logger.Logger
 	md      metadata
 	options listener.Options
@@ -92,7 +99,18 @@ func (l *realityListener) Init(md md.Metadata) (err error) {
 		cfg.ShortIds[id] = true
 	}
 
-	l.ln = reality.NewListener(ln, cfg)
+	// reality.NewListener is not used on purpose: its accept loop exits for
+	// good on the first transient error (e.g. ECONNABORTED) while keeping the
+	// socket open, so the kernel keeps completing handshakes into a backlog
+	// nobody drains and the port silently goes dark. Run the handshakes from
+	// our own loop instead, which survives transient errors, and hand the
+	// established connections over a buffered channel.
+	l.ln = ln
+	l.cfg = cfg
+	l.conns = make(chan net.Conn, 128)
+	l.done = make(chan struct{})
+	go reality.DetectPostHandshakeRecordsLens(cfg)
+	go l.acceptLoop()
 
 	if pub, err := curve25519.X25519(l.md.privateKey, curve25519.Basepoint); err == nil {
 		l.logger.Infof("reality dest %s, public key %s",
@@ -105,10 +123,74 @@ func (l *realityListener) Init(md md.Metadata) (err error) {
 	return
 }
 
-func (l *realityListener) Accept() (net.Conn, error) {
-	conn, err := l.ln.Accept()
+// acceptLoop accepts raw connections and runs the REALITY handshake of each
+// in its own goroutine, since the handshake dials the dest server and must
+// not hold up the loop. Transient accept errors are retried with a backoff.
+func (l *realityListener) acceptLoop() {
+	var tempDelay time.Duration
+	for {
+		conn, err := l.ln.Accept()
+		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				close(l.conns)
+				return
+			}
+			if ne, ok := err.(net.Error); ok && ne.Temporary() {
+				if tempDelay == 0 {
+					tempDelay = 1 * time.Second
+				} else {
+					tempDelay *= 2
+				}
+				if max := 5 * time.Second; tempDelay > max {
+					tempDelay = max
+				}
+				l.logger.Warnf("reality: accept: %v, retrying in %v", err, tempDelay)
+				select {
+				case <-time.After(tempDelay):
+				case <-l.done:
+				}
+				continue
+			}
+			l.err = err
+			close(l.conns)
+			return
+		}
+		tempDelay = 0
+
+		go l.handshake(conn)
+	}
+}
+
+func (l *realityListener) handshake(conn net.Conn) {
+	defer func() {
+		if r := recover(); r != nil {
+			l.logger.Errorf("reality: handshake panic: %v", r)
+			conn.Close()
+		}
+	}()
+
+	c, err := reality.Server(context.Background(), conn, l.cfg)
 	if err != nil {
-		return nil, err
+		// Includes the connections REALITY proxied to the dest server after
+		// a failed authentication; either way this end is done with them.
+		conn.Close()
+		return
+	}
+
+	select {
+	case l.conns <- c:
+	case <-l.done:
+		c.Close()
+	}
+}
+
+func (l *realityListener) Accept() (net.Conn, error) {
+	conn, ok := <-l.conns
+	if !ok {
+		if l.err != nil {
+			return nil, l.err
+		}
+		return nil, net.ErrClosed
 	}
 
 	// The connection is already wrapped underneath, see wrapListener.
@@ -123,21 +205,8 @@ func (l *realityListener) Addr() net.Addr {
 }
 
 func (l *realityListener) Close() error {
-	err := l.ln.Close()
-
-	// REALITY hands the connections that finished their handshake over an
-	// unbuffered channel. Once nothing accepts them anymore the goroutine of
-	// every handshake still in flight would block on it forever, holding its
-	// connection, so drain until the listener reports it is done.
-	go func() {
-		for {
-			conn, err := l.ln.Accept()
-			if err != nil {
-				return
-			}
-			conn.Close()
-		}
-	}()
-
-	return err
+	l.closed.Do(func() {
+		close(l.done)
+	})
+	return l.ln.Close()
 }
