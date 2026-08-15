@@ -29,9 +29,19 @@ type cachedResolver struct {
 
 type cacheEntry struct {
 	addrs      []string
+	err        error
 	expires    time.Time
 	refreshing bool
+	// ready is non-nil while the very first lookup for this host is in
+	// flight, and is closed once it completes. Callers that arrive during
+	// that window wait on it instead of each firing their own lookup.
+	ready chan struct{}
 }
+
+// destResolver is shared by every listener. The cache is keyed by host, and
+// listeners overwhelmingly share the same few dests, so a per-listener cache
+// would mean hundreds of copies each resolving and refreshing the same name.
+var destResolver = newCachedResolver(destDNSTTL)
 
 func newCachedResolver(ttl time.Duration) *cachedResolver {
 	return &cachedResolver{
@@ -50,6 +60,18 @@ func (r *cachedResolver) lookupHost(ctx context.Context, host string) ([]string,
 
 	r.mu.Lock()
 	if e, ok := r.entries[host]; ok {
+		if ready := e.ready; ready != nil {
+			r.mu.Unlock()
+			select {
+			case <-ready:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+			r.mu.Lock()
+			addrs, err := e.addrs, e.err
+			r.mu.Unlock()
+			return addrs, err
+		}
 		if now.After(e.expires) && !e.refreshing {
 			e.refreshing = true
 			go r.refresh(host)
@@ -58,17 +80,24 @@ func (r *cachedResolver) lookupHost(ctx context.Context, host string) ([]string,
 		r.mu.Unlock()
 		return addrs, nil
 	}
+	e := &cacheEntry{ready: make(chan struct{})}
+	r.entries[host] = e
 	r.mu.Unlock()
 
 	addrs, err := r.base.LookupHost(ctx, host)
-	if err != nil {
-		return nil, err
-	}
 
 	r.mu.Lock()
-	r.entries[host] = &cacheEntry{addrs: addrs, expires: now.Add(r.ttl)}
+	ready := e.ready
+	e.addrs, e.err, e.expires = addrs, err, time.Now().Add(r.ttl)
+	e.ready = nil
+	if err != nil {
+		// Do not cache a failure; let the next caller retry.
+		delete(r.entries, host)
+	}
 	r.mu.Unlock()
-	return addrs, nil
+	close(ready)
+
+	return addrs, err
 }
 
 func (r *cachedResolver) refresh(host string) {
