@@ -176,12 +176,25 @@ func (l *realityListener) handshake(conn net.Conn) {
 		}
 	}()
 
+	// Bound the whole handshake. REALITY reads the ClientHello off conn with
+	// no deadline; a client that connects and then stalls would otherwise
+	// hold this goroutine (and the connection) forever. The deadline also
+	// caps how long a failed-auth fallback splice to the dest can run.
+	if l.md.handshakeTimeout > 0 {
+		conn.SetDeadline(time.Now().Add(l.md.handshakeTimeout))
+	}
+
 	c, err := reality.Server(context.Background(), conn, l.cfg)
 	if err != nil {
 		// Includes the connections REALITY proxied to the dest server after
 		// a failed authentication; either way this end is done with them.
 		conn.Close()
 		return
+	}
+
+	// Clear it so it does not later interrupt the proxied traffic.
+	if l.md.handshakeTimeout > 0 {
+		c.SetDeadline(time.Time{})
 	}
 
 	select {

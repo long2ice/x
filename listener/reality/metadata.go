@@ -29,7 +29,8 @@ type metadata struct {
 	maxClientVer []byte
 	maxTimeDiff  time.Duration
 
-	dialTimeout time.Duration
+	dialTimeout      time.Duration
+	handshakeTimeout time.Duration
 }
 
 func (l *realityListener) parseMetadata(md mdata.Metadata) (err error) {
@@ -94,6 +95,16 @@ func (l *realityListener) parseMetadata(md mdata.Metadata) (err error) {
 	l.md.dialTimeout = mdutil.GetDuration(md, "reality.dialTimeout", "dialTimeout")
 	if l.md.dialTimeout <= 0 {
 		l.md.dialTimeout = 10 * time.Second
+	}
+
+	// A whole-handshake deadline. REALITY reads the client's ClientHello with
+	// no deadline of its own, so a client that opens a connection and then
+	// sends nothing (or dribbles) parks a handshake goroutine forever. One
+	// misbehaving client opening thousands of such connections exhausts the
+	// port and starves real clients. Bound the handshake so those go away.
+	l.md.handshakeTimeout = mdutil.GetDuration(md, "reality.handshakeTimeout", "handshakeTimeout")
+	if l.md.handshakeTimeout <= 0 {
+		l.md.handshakeTimeout = 15 * time.Second
 	}
 
 	return nil
