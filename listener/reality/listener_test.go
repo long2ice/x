@@ -106,3 +106,37 @@ func TestAcceptLoopSurvivesTemporaryError(t *testing.T) {
 		t.Fatalf("expected net.ErrClosed from Accept, got %v", err)
 	}
 }
+
+// TestHandshakeSlotsAreBoundedPerIP checks that one source address cannot
+// occupy more than its share of concurrent handshakes, which is what let a
+// single reconnecting client fill a port's accept queue and lock everyone
+// else out for minutes.
+func TestHandshakeSlotsAreBoundedPerIP(t *testing.T) {
+	l := &realityListener{
+		inflight: make(map[string]int),
+		md:       metadata{maxHandshakesPerIP: 2},
+	}
+
+	if !l.acquire("1.2.3.4") || !l.acquire("1.2.3.4") {
+		t.Fatal("the first two handshakes should get a slot")
+	}
+	if l.acquire("1.2.3.4") {
+		t.Fatal("the third handshake from the same address should be refused")
+	}
+	// A different client must not be affected by a noisy neighbour.
+	if !l.acquire("5.6.7.8") {
+		t.Fatal("another address should still get a slot")
+	}
+
+	l.release("1.2.3.4")
+	if !l.acquire("1.2.3.4") {
+		t.Fatal("a released slot should be reusable")
+	}
+
+	l.release("1.2.3.4")
+	l.release("1.2.3.4")
+	l.release("5.6.7.8")
+	if len(l.inflight) != 0 {
+		t.Fatalf("released slots should not be retained: %v", l.inflight)
+	}
+}

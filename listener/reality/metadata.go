@@ -29,8 +29,9 @@ type metadata struct {
 	maxClientVer []byte
 	maxTimeDiff  time.Duration
 
-	dialTimeout      time.Duration
-	handshakeTimeout time.Duration
+	dialTimeout        time.Duration
+	handshakeTimeout   time.Duration
+	maxHandshakesPerIP int
 }
 
 func (l *realityListener) parseMetadata(md mdata.Metadata) (err error) {
@@ -105,6 +106,15 @@ func (l *realityListener) parseMetadata(md mdata.Metadata) (err error) {
 	l.md.handshakeTimeout = mdutil.GetDuration(md, "reality.handshakeTimeout", "handshakeTimeout")
 	if l.md.handshakeTimeout <= 0 {
 		l.md.handshakeTimeout = 15 * time.Second
+	}
+
+	// How many handshakes one source address may have in flight. A client
+	// reconnecting in a loop can otherwise occupy the whole port: its
+	// connections queue up in the kernel backlog, and by the time one is
+	// accepted every other client has been waiting minutes behind it.
+	l.md.maxHandshakesPerIP = mdutil.GetInt(md, "reality.maxHandshakesPerIP", "maxHandshakesPerIP")
+	if l.md.maxHandshakesPerIP == 0 {
+		l.md.maxHandshakesPerIP = 64
 	}
 
 	return nil
