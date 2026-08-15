@@ -155,7 +155,7 @@ func (l *realityListener) Init(md md.Metadata) (err error) {
 	l.conns = make(chan net.Conn, 128)
 	l.done = make(chan struct{})
 	go reality.DetectPostHandshakeRecordsLens(cfg)
-	for range 4 {
+	for range l.md.acceptLoops {
 		go l.acceptLoop()
 	}
 

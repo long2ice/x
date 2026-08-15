@@ -3,7 +3,6 @@ package net
 import (
 	"context"
 	"io"
-	"sync"
 	"time"
 
 	"github.com/go-gost/core/common/bufpool"
@@ -30,47 +29,37 @@ func PipeIdle(ctx context.Context, rw1, rw2 io.ReadWriteCloser, idleTimeout time
 }
 
 func pipe(ctx context.Context, rw1, rw2 io.ReadWriteCloser, idle time.Duration) error {
-	wg := sync.WaitGroup{}
-	wg.Add(2)
-
+	// The channel is buffered so both copy goroutines can always deliver
+	// their result and exit, even when this goroutine has already returned
+	// on ctx cancellation. The calling goroutine collects the results
+	// itself: with one pipe per proxied connection, a dedicated watcher
+	// goroutine just to wait on the pair is real memory and scheduler load
+	// on a busy node.
 	ch := make(chan error, 2)
 
 	go func() {
-		defer wg.Done()
-		if err := pipeBuffer(rw1, rw2, bufferSize/2, idle); err != nil {
-			ch <- err
-		}
+		ch <- pipeBuffer(rw1, rw2, bufferSize/2, idle)
 	}()
 	go func() {
-		defer wg.Done()
-		if err := pipeBuffer(rw2, rw1, bufferSize/2, idle); err != nil {
-			ch <- err
+		ch <- pipeBuffer(rw2, rw1, bufferSize/2, idle)
+	}()
+
+	var err error
+	for range 2 {
+		select {
+		case e := <-ch:
+			if err == nil {
+				err = e
+			}
+		case <-ctx.Done():
+			// Force-close so the pipe goroutines exit promptly instead of
+			// waiting up to idleTimeout / TCP keepalive for the next Read.
+			rw1.Close()
+			rw2.Close()
+			return nil
 		}
-	}()
-
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-	case <-ctx.Done():
-		// Force-close so the pipe goroutines exit promptly instead of
-		// waiting up to idleTimeout / TCP keepalive for the next Read.
-		rw1.Close()
-		rw2.Close()
-		return nil
 	}
-
-	select {
-	case err := <-ch:
-		return err
-	default:
-	}
-
-	return nil
+	return err
 }
 
 type readDeadlineSetter interface {

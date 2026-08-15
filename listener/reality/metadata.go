@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -31,6 +32,7 @@ type metadata struct {
 
 	dialTimeout        time.Duration
 	handshakeTimeout   time.Duration
+	acceptLoops        int
 	maxConnsPerIP      int
 }
 
@@ -108,17 +110,27 @@ func (l *realityListener) parseMetadata(md mdata.Metadata) (err error) {
 		l.md.handshakeTimeout = 15 * time.Second
 	}
 
-	// How many live connections one source address may hold on this port. A
-	// client flooding connections can otherwise occupy the whole port: its
-	// connections fill the kernel backlog and the handshake capacity, and by
-	// the time one is accepted every other client has been waiting minutes
-	// behind it. Connections over the cap are closed right at accept, which
-	// also drains the backlog at full speed. Set to a negative value to
-	// disable.
-	l.md.maxConnsPerIP = mdutil.GetInt(md, "reality.maxConnsPerIP", "maxConnsPerIP")
-	if l.md.maxConnsPerIP == 0 {
-		l.md.maxConnsPerIP = 256
+	// How many goroutines accept on this listener. One is not enough on a
+	// loaded node: the accept goroutine waits its turn in the scheduler
+	// between every accept, which capped a busy port at roughly a dozen
+	// accepts per second while its queue sat hundreds deep. More entries in
+	// the run queue mean one of them getting scheduled is enough to keep
+	// draining. Beyond about twice GOMAXPROCS they cannot run concurrently
+	// anyway and just park, so that is the default.
+	l.md.acceptLoops = mdutil.GetInt(md, "reality.acceptLoops", "acceptLoops")
+	if l.md.acceptLoops <= 0 {
+		l.md.acceptLoops = 2 * runtime.GOMAXPROCS(0)
 	}
+
+	// How many live connections one source address may hold on this port,
+	// as an opt-in guard for the extreme case: a client flooding connections
+	// can occupy the whole port — its connections fill the kernel backlog
+	// and the handshake capacity, and by the time one is accepted every
+	// other client has been waiting minutes behind it. Connections over the
+	// cap are closed right at accept, which also drains the backlog at full
+	// speed. Unset means unlimited; normal load is meant to be carried, not
+	// clipped.
+	l.md.maxConnsPerIP = mdutil.GetInt(md, "reality.maxConnsPerIP", "maxConnsPerIP")
 
 	return nil
 }
