@@ -56,9 +56,14 @@ func (l *realityListener) Init(md md.Metadata) (err error) {
 		network = "tcp4"
 	}
 
+	// Go enables MPTCP for TCP listeners by default. ISP middleboxes that
+	// mangle the MPTCP options leave those clients' connections sitting in
+	// the accept queue as children that never become acceptable, until the
+	// queue is full of them and the port goes dark. Set it explicitly so it
+	// is off unless asked for.
 	lc := net.ListenConfig{}
+	lc.SetMultipathTCP(l.md.mptcp)
 	if l.md.mptcp {
-		lc.SetMultipathTCP(true)
 		l.logger.Debugf("mptcp enabled: %v", lc.MultipathTCP())
 	}
 	ln, err := lc.Listen(context.Background(), network, l.options.Addr)
