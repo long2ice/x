@@ -45,6 +45,16 @@ func (ln *wrapListener) Accept() (net.Conn, error) {
 			continue
 		}
 
+		// A source address only gets so many live connections on this port.
+		// Closing the excess right here keeps a flooding client from filling
+		// the accept queue and the handshake capacity, so everyone else
+		// keeps getting through; it also drains the backlog at full speed.
+		host, _, _ := net.SplitHostPort(c.RemoteAddr().String())
+		if !ln.l.acquire(host) {
+			c.Close()
+			continue
+		}
+
 		opts := ln.l.options
 
 		if opts.ConnLimiter != nil {
@@ -78,17 +88,34 @@ func (ln *wrapListener) Accept() (net.Conn, error) {
 			limiter.SrcOption(c.RemoteAddr().String()),
 		)
 
-		return &closeWriteConn{Conn: c, raw: cw}, nil
+		return &closeWriteConn{
+			Conn: c,
+			raw:  cw,
+			release: func() {
+				ln.l.release(host)
+			},
+		}, nil
 	}
 }
 
 type closeWriteConn struct {
 	net.Conn
 	raw xio.CloseWrite
+
+	// release returns the per-source connection slot taken at accept.
+	release     func()
+	releaseOnce sync.Once
 }
 
 func (c *closeWriteConn) CloseWrite() error {
 	return c.raw.CloseWrite()
+}
+
+func (c *closeWriteConn) Close() error {
+	if c.release != nil {
+		c.releaseOnce.Do(c.release)
+	}
+	return c.Conn.Close()
 }
 
 // realityConn hands the transport below the TLS layer to XTLS Vision.

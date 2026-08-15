@@ -31,7 +31,7 @@ type metadata struct {
 
 	dialTimeout        time.Duration
 	handshakeTimeout   time.Duration
-	maxHandshakesPerIP int
+	maxConnsPerIP      int
 }
 
 func (l *realityListener) parseMetadata(md mdata.Metadata) (err error) {
@@ -108,13 +108,16 @@ func (l *realityListener) parseMetadata(md mdata.Metadata) (err error) {
 		l.md.handshakeTimeout = 15 * time.Second
 	}
 
-	// How many handshakes one source address may have in flight. A client
-	// reconnecting in a loop can otherwise occupy the whole port: its
-	// connections queue up in the kernel backlog, and by the time one is
-	// accepted every other client has been waiting minutes behind it.
-	l.md.maxHandshakesPerIP = mdutil.GetInt(md, "reality.maxHandshakesPerIP", "maxHandshakesPerIP")
-	if l.md.maxHandshakesPerIP == 0 {
-		l.md.maxHandshakesPerIP = 64
+	// How many live connections one source address may hold on this port. A
+	// client flooding connections can otherwise occupy the whole port: its
+	// connections fill the kernel backlog and the handshake capacity, and by
+	// the time one is accepted every other client has been waiting minutes
+	// behind it. Connections over the cap are closed right at accept, which
+	// also drains the backlog at full speed. Set to a negative value to
+	// disable.
+	l.md.maxConnsPerIP = mdutil.GetInt(md, "reality.maxConnsPerIP", "maxConnsPerIP")
+	if l.md.maxConnsPerIP == 0 {
+		l.md.maxConnsPerIP = 256
 	}
 
 	return nil

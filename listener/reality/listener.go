@@ -35,21 +35,23 @@ type realityListener struct {
 	md           metadata
 	options      listener.Options
 
-	// inflight counts the handshakes each source address currently has in
-	// flight, so no single client can occupy the whole port.
+	// inflight counts the live connections each source address holds on this
+	// port, so no single client can occupy the whole port.
 	inflightMu sync.Mutex
 	inflight   map[string]int
 }
 
-// acquire reserves a handshake slot for host, reporting whether one was free.
+// acquire reserves a connection slot for host, reporting whether one was
+// free. The slot is held for the connection's whole lifetime and returned by
+// release, which the connection's Close triggers.
 func (l *realityListener) acquire(host string) bool {
-	if l.md.maxHandshakesPerIP <= 0 {
+	if l.md.maxConnsPerIP <= 0 {
 		return true
 	}
 
 	l.inflightMu.Lock()
 	defer l.inflightMu.Unlock()
-	if l.inflight[host] >= l.md.maxHandshakesPerIP {
+	if l.inflight[host] >= l.md.maxConnsPerIP {
 		return false
 	}
 	l.inflight[host]++
@@ -57,7 +59,7 @@ func (l *realityListener) acquire(host string) bool {
 }
 
 func (l *realityListener) release(host string) {
-	if l.md.maxHandshakesPerIP <= 0 {
+	if l.md.maxConnsPerIP <= 0 {
 		return
 	}
 
@@ -210,16 +212,6 @@ func (l *realityListener) handshake(conn net.Conn) {
 			conn.Close()
 		}
 	}()
-
-	host, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
-	if !l.acquire(host) {
-		// This source already has the most handshakes we let it run at once.
-		// Dropping the connection here keeps the port responsive for everyone
-		// else instead of letting one client fill the accept queue.
-		conn.Close()
-		return
-	}
-	defer l.release(host)
 
 	// Bound the whole handshake. REALITY reads the ClientHello off conn with
 	// no deadline; a client that connects and then stalls would otherwise

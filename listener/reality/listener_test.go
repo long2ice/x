@@ -107,14 +107,14 @@ func TestAcceptLoopSurvivesTemporaryError(t *testing.T) {
 	}
 }
 
-// TestHandshakeSlotsAreBoundedPerIP checks that one source address cannot
+// TestConnSlotsAreBoundedPerIP checks that one source address cannot
 // occupy more than its share of concurrent handshakes, which is what let a
 // single reconnecting client fill a port's accept queue and lock everyone
 // else out for minutes.
-func TestHandshakeSlotsAreBoundedPerIP(t *testing.T) {
+func TestConnSlotsAreBoundedPerIP(t *testing.T) {
 	l := &realityListener{
 		inflight: make(map[string]int),
-		md:       metadata{maxHandshakesPerIP: 2},
+		md:       metadata{maxConnsPerIP: 2},
 	}
 
 	if !l.acquire("1.2.3.4") || !l.acquire("1.2.3.4") {
