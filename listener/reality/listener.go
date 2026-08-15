@@ -30,6 +30,7 @@ type realityListener struct {
 	done         chan struct{}
 	err          error
 	closed       sync.Once
+	closeConns   sync.Once
 	destResolver *cachedResolver
 	logger       logger.Logger
 	md           metadata
@@ -154,7 +155,9 @@ func (l *realityListener) Init(md md.Metadata) (err error) {
 	l.conns = make(chan net.Conn, 128)
 	l.done = make(chan struct{})
 	go reality.DetectPostHandshakeRecordsLens(cfg)
-	go l.acceptLoop()
+	for range 4 {
+		go l.acceptLoop()
+	}
 
 	if pub, err := curve25519.X25519(l.md.privateKey, curve25519.Basepoint); err == nil {
 		l.logger.Infof("reality dest %s, public key %s",
@@ -170,13 +173,17 @@ func (l *realityListener) Init(md md.Metadata) (err error) {
 // acceptLoop accepts raw connections and runs the REALITY handshake of each
 // in its own goroutine, since the handshake dials the dest server and must
 // not hold up the loop. Transient accept errors are retried with a backoff.
+// Several instances run per listener (see Init): accepting from multiple
+// goroutines is safe, and on a busy box it multiplies the chances that one of
+// them is scheduled promptly, so the accept queue drains under load instead
+// of waiting behind thousands of runnable goroutines.
 func (l *realityListener) acceptLoop() {
 	var tempDelay time.Duration
 	for {
 		conn, err := l.ln.Accept()
 		if err != nil {
 			if errors.Is(err, net.ErrClosed) {
-				close(l.conns)
+				l.closeConns.Do(func() { close(l.conns) })
 				return
 			}
 			if ne, ok := err.(net.Error); ok && ne.Temporary() {
@@ -195,8 +202,10 @@ func (l *realityListener) acceptLoop() {
 				}
 				continue
 			}
-			l.err = err
-			close(l.conns)
+			l.closeConns.Do(func() {
+				l.err = err
+				close(l.conns)
+			})
 			return
 		}
 		tempDelay = 0
