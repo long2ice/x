@@ -24,15 +24,16 @@ func init() {
 }
 
 type realityListener struct {
-	ln      net.Listener
-	cfg     *reality.Config
-	conns   chan net.Conn
-	done    chan struct{}
-	err     error
-	closed  sync.Once
-	logger  logger.Logger
-	md      metadata
-	options listener.Options
+	ln           net.Listener
+	cfg          *reality.Config
+	conns        chan net.Conn
+	done         chan struct{}
+	err          error
+	closed       sync.Once
+	destResolver *cachedResolver
+	logger       logger.Logger
+	md           metadata
+	options      listener.Options
 }
 
 func NewListener(opts ...listener.Option) listener.Listener {
@@ -94,7 +95,7 @@ func (l *realityListener) Init(md md.Metadata) (err error) {
 		NextProtos:             nil,
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			d := net.Dialer{Timeout: l.md.dialTimeout}
-			return d.DialContext(ctx, network, addr)
+			return l.destResolver.dial(ctx, &d, network, addr)
 		},
 	}
 	for _, name := range l.md.serverNames {
@@ -112,6 +113,7 @@ func (l *realityListener) Init(md md.Metadata) (err error) {
 	// established connections over a buffered channel.
 	l.ln = ln
 	l.cfg = cfg
+	l.destResolver = newCachedResolver(destDNSTTL)
 	l.conns = make(chan net.Conn, 128)
 	l.done = make(chan struct{})
 	go reality.DetectPostHandshakeRecordsLens(cfg)
