@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"sync"
 	"syscall"
 
 	limiter "github.com/go-gost/core/limiter/conn"
@@ -18,7 +19,8 @@ var (
 // serverConn is a server side Conn with metrics supported.
 type serverConn struct {
 	net.Conn
-	limiter limiter.Limiter
+	limiter     limiter.Limiter
+	releaseOnce sync.Once
 }
 
 func WrapConn(limiter limiter.Limiter, c net.Conn) net.Conn {
@@ -41,7 +43,9 @@ func (c *serverConn) SyscallConn() (rc syscall.RawConn, err error) {
 }
 
 func (c *serverConn) Close() error {
-	c.limiter.Allow(-1)
+	c.releaseOnce.Do(func() {
+		c.limiter.Allow(-1)
+	})
 	return c.Conn.Close()
 }
 

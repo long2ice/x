@@ -13,14 +13,15 @@ import (
 )
 
 type metadata struct {
-	users         map[string]string
-	readTimeout   time.Duration
+	users       map[string]string
+	readTimeout time.Duration
 	// idleTimeout bounds how long a proxied TCP conn can sit fully idle
 	// before it is reclaimed. Proxy clients (e.g. video players opening a
 	// connection per media request) may keep finished conns open forever;
 	// without this bound they pile up until the kernel runs out of TCP
 	// memory.
 	idleTimeout   time.Duration
+	bufferSize    int
 	hash          string
 	enableUDP     bool
 	udpBufferSize int
@@ -51,7 +52,15 @@ func (h *vlessHandler) parseMetadata(md mdata.Metadata) (err error) {
 
 	h.md.idleTimeout = mdutil.GetDuration(md, "idleTimeout")
 	if h.md.idleTimeout <= 0 {
-		h.md.idleTimeout = 5 * time.Minute
+		h.md.idleTimeout = 90 * time.Second
+	}
+
+	h.md.bufferSize = mdutil.GetInt(md, "tcp.bufferSize", "bufferSize")
+	if h.md.bufferSize <= 0 {
+		// VLESS nodes often carry many concurrent streams. A smaller per-direction
+		// copy buffer substantially reduces their live heap without changing the
+		// buffer used by other handlers.
+		h.md.bufferSize = 16 * 1024
 	}
 
 	h.md.users = mdutil.GetStringMapString(md, "users")

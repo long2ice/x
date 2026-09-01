@@ -111,7 +111,7 @@ func (h *vlessHandler) handleTCP(ctx context.Context, conn net.Conn, network, ad
 
 	t := time.Now()
 	log.Infof("%s <-> %s", conn.RemoteAddr(), address)
-	xnet.PipeIdle(ctx, conn, cc, h.md.idleTimeout)
+	xnet.PipeIdleBuffer(ctx, conn, cc, h.md.idleTimeout, h.md.bufferSize)
 	log.WithFields(map[string]any{
 		"duration": time.Since(t),
 	}).Infof("%s >-< %s", conn.RemoteAddr(), address)

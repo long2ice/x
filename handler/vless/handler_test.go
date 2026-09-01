@@ -250,3 +250,30 @@ func TestNoUsers(t *testing.T) {
 		t.Errorf("got %v, want %v", err, ErrNoUser)
 	}
 }
+
+func TestMetadataConnectionDefaults(t *testing.T) {
+	h := &vlessHandler{}
+	if err := h.parseMetadata(xmd.NewMetadata(nil)); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := h.md.idleTimeout, 90*time.Second; got != want {
+		t.Errorf("idle timeout = %v, want %v", got, want)
+	}
+	if got, want := h.md.bufferSize, 16*1024; got != want {
+		t.Errorf("buffer size = %d, want %d", got, want)
+	}
+
+	h = &vlessHandler{}
+	if err := h.parseMetadata(xmd.NewMetadata(map[string]any{
+		"idleTimeout":    "2m",
+		"tcp.bufferSize": 24 * 1024,
+	})); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := h.md.idleTimeout, 2*time.Minute; got != want {
+		t.Errorf("configured idle timeout = %v, want %v", got, want)
+	}
+	if got, want := h.md.bufferSize, 24*1024; got != want {
+		t.Errorf("configured buffer size = %d, want %d", got, want)
+	}
+}
