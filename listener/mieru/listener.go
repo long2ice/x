@@ -2,7 +2,6 @@ package mieru
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -19,8 +18,8 @@ import (
 	xctx "github.com/go-gost/x/ctx"
 	umieru "github.com/go-gost/x/internal/util/mieru"
 	climiter "github.com/go-gost/x/limiter/conn/wrapper"
-	limiter_wrapper "github.com/go-gost/x/limiter/traffic/wrapper"
 	traffic_limiter "github.com/go-gost/x/limiter/traffic"
+	limiter_wrapper "github.com/go-gost/x/limiter/traffic/wrapper"
 	metrics "github.com/go-gost/x/metrics/wrapper"
 	stats "github.com/go-gost/x/observer/stats/wrapper"
 	"github.com/go-gost/x/registry"
@@ -126,58 +125,70 @@ func listenerAddr(port int, protocol string) net.Addr {
 }
 
 func (l *mieruListener) Accept() (net.Conn, error) {
-	conn, req, err := l.server.Accept()
-	if err != nil {
-		if !l.server.IsRunning() {
-			return nil, listener.ErrClosed
+	for {
+		conn, req, err := l.server.Accept()
+		if err != nil {
+			if conn != nil {
+				_ = conn.Close()
+			}
+			if !l.server.IsRunning() {
+				return nil, listener.ErrClosed
+			}
+			// A Mieru session may disappear or send an invalid SOCKS request
+			// after the shared server socket has accepted it. That is a
+			// per-session failure, not a listener failure. Returning it would
+			// make the GOST service exit its accept loop while Mieru's socket
+			// remains open, leaving the port in LISTEN but permanently dark.
+			l.log.Warnf("mieru: discarding failed session: %v", err)
+			continue
 		}
-		return nil, err
-	}
 
-	baseCtx := context.Background()
-	if userCtx, ok := conn.(apicommon.UserContext); ok && userCtx.UserName() != "" {
-		baseCtx = xctx.ContextWithClientID(baseCtx, xctx.ClientID(userCtx.UserName()))
-	}
-	baseCtx = umieru.ContextWithRequest(baseCtx, req)
+		baseCtx := context.Background()
+		if userCtx, ok := conn.(apicommon.UserContext); ok && userCtx.UserName() != "" {
+			baseCtx = xctx.ContextWithClientID(baseCtx, xctx.ClientID(userCtx.UserName()))
+		}
+		baseCtx = umieru.ContextWithRequest(baseCtx, req)
 
-	c := &contextConn{
-		Conn: conn,
-		ctx:  baseCtx,
-	}
+		c := &contextConn{
+			Conn: conn,
+			ctx:  baseCtx,
+		}
 
-	if l.options.ConnLimiter != nil {
-		host, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
-		if lim := l.options.ConnLimiter.Limiter(host); lim != nil {
-			if lim.Allow(1) {
-				c.Conn = climiter.WrapConn(lim, c.Conn)
-			} else {
-				c.Close()
-				return nil, errors.New("mieru: connection limit exceeded")
+		if l.options.ConnLimiter != nil {
+			host, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
+			if lim := l.options.ConnLimiter.Limiter(host); lim != nil {
+				if lim.Allow(1) {
+					c.Conn = climiter.WrapConn(lim, c.Conn)
+				} else {
+					_ = c.Close()
+					l.log.Warnf("mieru: connection limit exceeded for %s", host)
+					continue
+				}
 			}
 		}
+
+		c.Conn = metrics.WrapConn(l.options.Service, c.Conn)
+		c.Conn = stats.WrapConn(c.Conn, l.options.Stats)
+		c.Conn = limiter_wrapper.WrapConn(
+			c.Conn,
+			l.options.TrafficLimiter,
+			traffic_limiter.ServiceLimitKey,
+			limiter.ScopeOption(limiter.ScopeService),
+			limiter.ServiceOption(l.options.Service),
+			limiter.NetworkOption(c.LocalAddr().Network()),
+		)
+		c.Conn = limiter_wrapper.WrapConn(
+			c.Conn,
+			l.options.TrafficLimiter,
+			c.RemoteAddr().String(),
+			limiter.ScopeOption(limiter.ScopeConn),
+			limiter.ServiceOption(l.options.Service),
+			limiter.NetworkOption(c.LocalAddr().Network()),
+			limiter.SrcOption(c.RemoteAddr().String()),
+		)
+
+		return c, nil
 	}
-
-	c.Conn = metrics.WrapConn(l.options.Service, c.Conn)
-	c.Conn = stats.WrapConn(c.Conn, l.options.Stats)
-	c.Conn = limiter_wrapper.WrapConn(
-		c.Conn,
-		l.options.TrafficLimiter,
-		traffic_limiter.ServiceLimitKey,
-		limiter.ScopeOption(limiter.ScopeService),
-		limiter.ServiceOption(l.options.Service),
-		limiter.NetworkOption(c.LocalAddr().Network()),
-	)
-	c.Conn = limiter_wrapper.WrapConn(
-		c.Conn,
-		l.options.TrafficLimiter,
-		c.RemoteAddr().String(),
-		limiter.ScopeOption(limiter.ScopeConn),
-		limiter.ServiceOption(l.options.Service),
-		limiter.NetworkOption(c.LocalAddr().Network()),
-		limiter.SrcOption(c.RemoteAddr().String()),
-	)
-
-	return c, nil
 }
 
 func (l *mieruListener) Addr() net.Addr {
