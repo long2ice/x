@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -130,4 +131,28 @@ func TestMalformedHeaderRejected(t *testing.T) {
 	if _, err := prepareConn(ctx, s, time.Second); err == nil {
 		t.Fatal("malformed header accepted")
 	}
+}
+
+func TestConcurrentBufferedReads(t *testing.T) {
+	s, c := net.Pipe()
+	defer s.Close()
+	defer c.Close()
+	go c.Write([]byte("PROXY UNKNOWN\r\nabcdefgh"))
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	conn, err := prepareConn(ctx, s, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := io.ReadFull(conn, make([]byte, 1)); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
 }

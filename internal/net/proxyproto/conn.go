@@ -5,6 +5,7 @@ import (
 	"context"
 	"net"
 	"strconv"
+	"sync"
 
 	xio "github.com/go-gost/x/internal/io"
 	proxyproto "github.com/pires/go-proxyproto"
@@ -14,9 +15,13 @@ type serverConn struct {
 	net.Conn
 	ctx    context.Context
 	reader *bufio.Reader
+	readMu sync.Mutex
 }
 
 func (c *serverConn) Read(b []byte) (int, error) {
+	// net.Conn permits concurrent Read calls; bufio.Reader does not.
+	c.readMu.Lock()
+	defer c.readMu.Unlock()
 	if c.reader != nil {
 		n, err := c.reader.Read(b)
 		if c.reader.Buffered() == 0 {
