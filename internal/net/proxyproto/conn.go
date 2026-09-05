@@ -1,6 +1,7 @@
 package proxyproto
 
 import (
+	"bufio"
 	"context"
 	"net"
 	"strconv"
@@ -11,7 +12,19 @@ import (
 
 type serverConn struct {
 	net.Conn
-	ctx context.Context
+	ctx    context.Context
+	reader *bufio.Reader
+}
+
+func (c *serverConn) Read(b []byte) (int, error) {
+	if c.reader != nil {
+		n, err := c.reader.Read(b)
+		if c.reader.Buffered() == 0 {
+			c.reader = nil
+		}
+		return n, err
+	}
+	return c.Conn.Read(b)
 }
 
 func (c *serverConn) Context() context.Context {

@@ -3,7 +3,7 @@ package reality
 import (
 	"context"
 	"encoding/base64"
-	"errors"
+	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -13,6 +13,7 @@ import (
 	md "github.com/go-gost/core/metadata"
 	admission "github.com/go-gost/x/admission/wrapper"
 	xnet "github.com/go-gost/x/internal/net"
+	"github.com/go-gost/x/internal/net/accept"
 	"github.com/go-gost/x/internal/net/proxyproto"
 	"github.com/go-gost/x/registry"
 	"github.com/xtls/reality"
@@ -26,11 +27,6 @@ func init() {
 type realityListener struct {
 	ln           net.Listener
 	cfg          *reality.Config
-	conns        chan net.Conn
-	done         chan struct{}
-	err          error
-	closed       sync.Once
-	closeConns   sync.Once
 	destResolver *cachedResolver
 	logger       logger.Logger
 	md           metadata
@@ -146,18 +142,18 @@ func (l *realityListener) Init(md md.Metadata) (err error) {
 	// good on the first transient error (e.g. ECONNABORTED) while keeping the
 	// socket open, so the kernel keeps completing handshakes into a backlog
 	// nobody drains and the port silently goes dark. Run the handshakes from
-	// our own loop instead, which survives transient errors, and hand the
-	// established connections over a buffered channel.
-	l.ln = ln
+	// a bounded setup listener instead, which survives transient errors and
+	// retains ownership until the completed connection is handed to Accept.
 	l.cfg = cfg
 	l.destResolver = destResolver
 	l.inflight = make(map[string]int)
-	l.conns = make(chan net.Conn, 128)
-	l.done = make(chan struct{})
-	go reality.DetectPostHandshakeRecordsLens(cfg)
-	for range l.md.acceptLoops {
-		go l.acceptLoop()
-	}
+	startRecordDetection(cfg)
+	l.ln = accept.NewListener(ln, accept.Config{
+		AcceptLoops: l.md.acceptLoops,
+		MaxPending:  l.md.maxPending,
+		Timeout:     l.md.handshakeTimeout,
+		Prepare:     l.handshake,
+	})
 
 	if pub, err := curve25519.X25519(l.md.privateKey, curve25519.Basepoint); err == nil {
 		l.logger.Infof("reality dest %s, public key %s",
@@ -170,93 +166,53 @@ func (l *realityListener) Init(md md.Metadata) (err error) {
 	return
 }
 
-// acceptLoop accepts raw connections and runs the REALITY handshake of each
-// in its own goroutine, since the handshake dials the dest server and must
-// not hold up the loop. Transient accept errors are retried with a backoff.
-// Several instances run per listener (see Init): accepting from multiple
-// goroutines is safe, and on a busy box it multiplies the chances that one of
-// them is scheduled promptly, so the accept queue drains under load instead
-// of waiting behind thousands of runnable goroutines.
-func (l *realityListener) acceptLoop() {
-	var tempDelay time.Duration
-	for {
-		conn, err := l.ln.Accept()
-		if err != nil {
-			if errors.Is(err, net.ErrClosed) {
-				l.closeConns.Do(func() { close(l.conns) })
-				return
-			}
-			if ne, ok := err.(net.Error); ok && ne.Temporary() {
-				if tempDelay == 0 {
-					tempDelay = 1 * time.Second
-				} else {
-					tempDelay *= 2
-				}
-				if max := 5 * time.Second; tempDelay > max {
-					tempDelay = max
-				}
-				l.logger.Warnf("reality: accept: %v, retrying in %v", err, tempDelay)
-				select {
-				case <-time.After(tempDelay):
-				case <-l.done:
-				}
-				continue
-			}
-			l.closeConns.Do(func() {
-				l.err = err
-				close(l.conns)
-			})
-			return
-		}
-		tempDelay = 0
-
-		go l.handshake(conn)
-	}
-}
-
-func (l *realityListener) handshake(conn net.Conn) {
+func (l *realityListener) handshake(ctx context.Context, conn net.Conn) (result net.Conn, err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			l.logger.Errorf("reality: handshake panic: %v", r)
+			err = fmt.Errorf("reality: handshake panic: %v", r)
 			conn.Close()
 		}
 	}()
-
-	// Bound the whole handshake. REALITY reads the ClientHello off conn with
-	// no deadline; a client that connects and then stalls would otherwise
-	// hold this goroutine (and the connection) forever. The deadline also
-	// caps how long a failed-auth fallback splice to the dest can run.
-	if l.md.handshakeTimeout > 0 {
-		conn.SetDeadline(time.Now().Add(l.md.handshakeTimeout))
+	// Upstream waits for this global cache without consulting ctx. Only enter
+	// Server once detection has finished; cancellation stays effective here.
+	if err := waitRecordDetection(ctx, l.cfg); err != nil {
+		return nil, err
 	}
-
-	c, err := reality.Server(context.Background(), conn, l.cfg)
-	if err != nil {
-		// Includes the connections REALITY proxied to the dest server after
-		// a failed authentication; either way this end is done with them.
-		conn.Close()
-		return
+	cfg := l.cfg.Clone()
+	var target net.Conn
+	var stop func() bool
+	defer func() {
+		if stop != nil {
+			stop()
+		}
+		if target != nil {
+			target.Close()
+		}
+	}()
+	cfg.DialContext = func(_ context.Context, network, addr string) (net.Conn, error) {
+		var err error
+		target, err = l.cfg.DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		// The client deadline cannot interrupt MirrorConn.Target.Write or a
+		// fallback read from dest. Own and cancel BOTH sockets, including dial.
+		if deadline, ok := ctx.Deadline(); ok {
+			if err = target.SetDeadline(deadline); err != nil {
+				target.Close()
+				return nil, err
+			}
+		}
+		stop = context.AfterFunc(ctx, func() { target.Close() })
+		return target, nil
 	}
-
-	// Clear it so it does not later interrupt the proxied traffic.
-	if l.md.handshakeTimeout > 0 {
-		c.SetDeadline(time.Time{})
-	}
-
-	select {
-	case l.conns <- c:
-	case <-l.done:
-		c.Close()
-	}
+	return reality.Server(ctx, conn, cfg)
 }
 
 func (l *realityListener) Accept() (net.Conn, error) {
-	conn, ok := <-l.conns
-	if !ok {
-		if l.err != nil {
-			return nil, l.err
-		}
-		return nil, net.ErrClosed
+	conn, err := l.ln.Accept()
+	if err != nil {
+		return nil, err
 	}
 
 	// The connection is already wrapped underneath, see wrapListener.
@@ -271,8 +227,5 @@ func (l *realityListener) Addr() net.Addr {
 }
 
 func (l *realityListener) Close() error {
-	l.closed.Do(func() {
-		close(l.done)
-	})
 	return l.ln.Close()
 }

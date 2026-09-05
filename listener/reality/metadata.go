@@ -30,10 +30,11 @@ type metadata struct {
 	maxClientVer []byte
 	maxTimeDiff  time.Duration
 
-	dialTimeout        time.Duration
-	handshakeTimeout   time.Duration
-	acceptLoops        int
-	maxConnsPerIP      int
+	dialTimeout      time.Duration
+	handshakeTimeout time.Duration
+	acceptLoops      int
+	maxConnsPerIP    int
+	maxPending       int
 }
 
 func (l *realityListener) parseMetadata(md mdata.Metadata) (err error) {
@@ -131,6 +132,11 @@ func (l *realityListener) parseMetadata(md mdata.Metadata) (err error) {
 	// speed. Unset means unlimited; normal load is meant to be carried, not
 	// clipped.
 	l.md.maxConnsPerIP = mdutil.GetInt(md, "reality.maxConnsPerIP", "maxConnsPerIP")
+	// Unlike maxConnsPerIP, this only caps setup, never established streams.
+	l.md.maxPending = mdutil.GetInt(md, "reality.maxPending", "maxPending")
+	if l.md.maxPending <= 0 {
+		l.md.maxPending = 128
+	}
 
 	return nil
 }

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/go-gost/core/logger"
+	"github.com/go-gost/x/internal/net/accept"
 	"github.com/xtls/reality"
 )
 
@@ -73,18 +74,16 @@ func TestAcceptLoopSurvivesTemporaryError(t *testing.T) {
 			ShortIds:    map[[8]byte]bool{{}: true},
 			DialContext: (&net.Dialer{Timeout: time.Second}).DialContext,
 		},
-		conns:  make(chan net.Conn, 128),
-		done:   make(chan struct{}),
 		logger: logger.Default(),
 	}
+	startRecordDetection(l.cfg)
+	l.ln = accept.NewListener(fl, accept.Config{Timeout: 3 * time.Second, Prepare: l.handshake})
 	defer l.Close()
 	defer fl.Close()
 
 	server, client := net.Pipe()
 	fl.results <- tempError{}
 	fl.results <- server
-
-	go l.acceptLoop()
 
 	// The connection is only ever accepted if the loop outlived the
 	// temporary error. Its bogus handshake must end with the conn closed,
