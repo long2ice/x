@@ -288,7 +288,6 @@ func ParseService(cfg *config.ServiceConfig) (service.Service, error) {
 	}
 
 	routerOpts = []chain.RouterOption{
-		chain.RetriesRouterOption(cfg.Handler.Retries),
 		chain.TimeoutRouterOption(dialTimeout),
 		chain.InterfaceRouterOption(ifce),
 		chain.NetnsRouterOption(netnsOut),
@@ -297,6 +296,9 @@ func ParseService(cfg *config.ServiceConfig) (service.Service, error) {
 		chain.HostMapperRouterOption(registry.HostsRegistry().Get(cfg.Hosts)),
 		chain.RecordersRouterOption(recorders...),
 		chain.LoggerRouterOption(handlerLogger),
+	}
+	if cfg.Handler.Retries != nil {
+		routerOpts = append(routerOpts, chain.RetriesRouterOption(*cfg.Handler.Retries))
 	}
 	if !ignoreChain {
 		routerOpts = append(routerOpts,

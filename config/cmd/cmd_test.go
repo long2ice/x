@@ -6,6 +6,30 @@ import (
 	"testing"
 )
 
+func TestCommandRetriesDefaultsAndExplicitZero(t *testing.T) {
+	for _, tt := range []struct {
+		query string
+		want  *int
+	}{
+		{query: ""},
+		{query: "?retries=0", want: intPointer(0)},
+		{query: "?retries=3", want: intPointer(3)},
+	} {
+		t.Run(tt.query, func(t *testing.T) {
+			cfg, err := BuildConfigFromCmd([]string{"socks5://:1080" + tt.query}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := cfg.Services[0].Handler.Retries
+			if (got == nil) != (tt.want == nil) || (got != nil && *got != *tt.want) {
+				t.Fatalf("retries = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func intPointer(v int) *int { return &v }
+
 func TestDecodeSIP002Auth(t *testing.T) {
 	tests := []struct {
 		name         string

@@ -335,8 +335,9 @@ type ListenerConfig struct {
 }
 
 type HandlerConfig struct {
-	Type       string            `json:"type"`
-	Retries    int               `yaml:",omitempty" json:"retries,omitempty"`
+	Type string `json:"type"`
+	// A nil value uses the router default; an explicit zero disables retries.
+	Retries    *int              `yaml:",omitempty" json:"retries,omitempty"`
 	Chain      string            `yaml:",omitempty" json:"chain,omitempty"`
 	ChainGroup *ChainGroupConfig `yaml:"chainGroup,omitempty" json:"chainGroup,omitempty"`
 	Auther     string            `yaml:",omitempty" json:"auther,omitempty"`

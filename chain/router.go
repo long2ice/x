@@ -19,15 +19,20 @@ type Router struct {
 	options chain.RouterOptions
 }
 
+const (
+	DefaultDialTimeout = 3 * time.Second
+	DefaultRetries     = 1
+)
+
 func NewRouter(opts ...chain.RouterOption) *Router {
-	r := &Router{}
+	r := &Router{options: chain.RouterOptions{Retries: DefaultRetries}}
 	for _, opt := range opts {
 		if opt != nil {
 			opt(&r.options)
 		}
 	}
 	if r.options.Timeout == 0 {
-		r.options.Timeout = 15 * time.Second
+		r.options.Timeout = DefaultDialTimeout
 	}
 
 	if r.options.Logger == nil {

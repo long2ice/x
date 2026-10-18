@@ -205,8 +205,9 @@ func BuildConfigFromCmd(serviceList, nodeList []string) (*config.Config, error) 
 
 		mh := service.Handler.Metadata
 		md := mdx.NewMetadata(mh)
-		if v := mdutil.GetInt(md, "retries"); v > 0 {
-			service.Handler.Retries = v
+		if md.IsExists("retries") {
+			v := mdutil.GetInt(md, "retries")
+			service.Handler.Retries = &v
 			delete(mh, "retries")
 		}
 		if v := mdutil.GetString(md, "admission"); v != "" {
