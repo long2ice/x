@@ -57,12 +57,16 @@ func pipe(ctx context.Context, rw1, rw2 io.ReadWriteCloser, idle time.Duration, 
 	var activity *pipeActivity
 	var idleTimer *time.Timer
 	var idleTimerC <-chan time.Time
-	if sharedIdle && idle > 0 {
+	if sharedIdle {
 		copyIdle = 0
+		// Keep using the supplied buffer even when idle reclamation is disabled.
+		// io.CopyBuffer's TCP fast paths can bypass it and allocate another one.
 		activity = newPipeActivity()
-		idleTimer = time.NewTimer(idle)
-		idleTimerC = idleTimer.C
-		defer idleTimer.Stop()
+		if idle > 0 {
+			idleTimer = time.NewTimer(idle)
+			idleTimerC = idleTimer.C
+			defer idleTimer.Stop()
+		}
 	}
 
 	go func() {

@@ -2,11 +2,63 @@ package net
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"testing"
 	"time"
 )
+
+type fastPathConn struct {
+	net.Conn
+	readSize chan int
+}
+
+func (c *fastPathConn) Read(b []byte) (int, error) {
+	select {
+	case c.readSize <- len(b):
+	default:
+	}
+	return c.Conn.Read(b)
+}
+
+func (c *fastPathConn) WriteTo(io.Writer) (int64, error) {
+	return 0, errors.New("unexpected WriterTo bypassed the configured copy buffer")
+}
+
+func (c *fastPathConn) ReadFrom(io.Reader) (int64, error) {
+	return 0, errors.New("unexpected ReadFrom bypassed the configured copy buffer")
+}
+
+func TestPipeIdleBufferHonorsSizeWithoutTimeout(t *testing.T) {
+	leftClient, leftPipe := net.Pipe()
+	rightPipe, rightServer := net.Pipe()
+	t.Cleanup(func() { leftClient.Close(); rightServer.Close() })
+	left := &fastPathConn{Conn: leftPipe, readSize: make(chan int, 1)}
+	right := &fastPathConn{Conn: rightPipe, readSize: make(chan int, 1)}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- PipeIdleBuffer(ctx, left, right, 0, 1024) }()
+	for _, conn := range []*fastPathConn{left, right} {
+		select {
+		case size := <-conn.readSize:
+			if size != 1024 {
+				t.Fatalf("copy read buffer = %d, want 1024", size)
+			}
+		case err := <-done:
+			t.Fatalf("copy did not use the configured buffer: %v", err)
+		case <-time.After(time.Second):
+			t.Fatal("copy did not start reading")
+		}
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("cancelled pipe did not exit")
+	}
+}
 
 func TestPipeIdleBufferKeepsOneWayTrafficAlive(t *testing.T) {
 	leftClient, leftPipe := net.Pipe()

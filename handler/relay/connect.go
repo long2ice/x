@@ -181,6 +181,8 @@ func (h *relayHandler) handleConnect(ctx context.Context, conn net.Conn, network
 			CertPool:            h.certPool,
 			MitmBypass:          h.md.mitmBypass,
 			ReadTimeout:         h.md.readTimeout,
+			IdleTimeout:         h.md.idleTimeout,
+			BufferSize:          h.md.bufferSize,
 		}
 
 		conn = xnet.NewReadWriteConn(br, conn, conn)
@@ -206,8 +208,7 @@ func (h *relayHandler) handleConnect(ctx context.Context, conn net.Conn, network
 
 	t := time.Now()
 	log.Infof("%s <-> %s", conn.RemoteAddr(), address)
-	// xnet.Transport(conn, cc)
-	xnet.Pipe(ctx, conn, cc)
+	h.transport(ctx, conn, cc, network)
 	log.WithFields(map[string]any{
 		"duration": time.Since(t),
 	}).Infof("%s >-< %s", conn.RemoteAddr(), address)
