@@ -21,8 +21,8 @@ import (
 	"github.com/xjasonlyu/tun2socks/v2/core"
 	"github.com/xjasonlyu/tun2socks/v2/core/adapter"
 	"github.com/xjasonlyu/tun2socks/v2/core/option"
-	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
+	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 )
 
 func init() {
@@ -117,6 +117,7 @@ func (h *tungoHandler) Handle(ctx context.Context, conn net.Conn, opts ...handle
 		udpQueue:       make(chan adapter.UDPConn),
 		udpTimeout:     h.md.udpTimeout,
 		tcpIdleTimeout: h.md.tcpIdleTimeout,
+		tcpBufferSize:  h.md.tcpBufferSize,
 		procCancel:     func() {},
 
 		sniffing:                h.md.sniffing,

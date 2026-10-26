@@ -132,7 +132,14 @@ func (h *socks5Handler) handleUDP(ctx context.Context, conn net.Conn, network st
 		WithBufferSize(h.md.udpBufferSize).
 		WithLogger(log)
 
-	go r.Run(ctx)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stop := context.AfterFunc(ctx, func() { conn.Close() })
+	defer stop()
+	go func() {
+		r.Run(ctx)
+		conn.Close()
+	}()
 
 	t := time.Now()
 	log.Debugf("%s <-> %s", conn.RemoteAddr(), cc.LocalAddr())

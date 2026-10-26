@@ -56,19 +56,23 @@ func (l *tcpListener) Close() error {
 }
 
 type tcpHandler struct {
-	session *mux.Session
-	options handler.Options
+	session     *mux.Session
+	options     handler.Options
+	idleTimeout time.Duration
+	bufferSize  int
 }
 
-func newTCPHandler(session *mux.Session, opts ...handler.Option) handler.Handler {
+func newTCPHandler(session *mux.Session, idleTimeout time.Duration, bufferSize int, opts ...handler.Option) handler.Handler {
 	options := handler.Options{}
 	for _, opt := range opts {
 		opt(&options)
 	}
 
 	return &tcpHandler{
-		session: session,
-		options: options,
+		session:     session,
+		options:     options,
+		idleTimeout: idleTimeout,
+		bufferSize:  bufferSize,
 	}
 }
 
@@ -114,7 +118,7 @@ func (h *tcpHandler) Handle(ctx context.Context, conn net.Conn, opts ...handler.
 	t := time.Now()
 	log.Debugf("%s <-> %s", conn.RemoteAddr(), cc.RemoteAddr())
 	// xnet.Transport(conn, cc)
-	xnet.Pipe(ctx, conn, cc)
+	xnet.PipeIdleBuffer(ctx, conn, cc, h.idleTimeout, h.bufferSize)
 	log.WithFields(map[string]any{"duration": time.Since(t)}).
 		Debugf("%s >-< %s", conn.RemoteAddr(), cc.RemoteAddr())
 	return nil

@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-gost/core/bypass"
 	mdata "github.com/go-gost/core/metadata"
+	"github.com/go-gost/x/internal/util/transport"
 	mdutil "github.com/go-gost/x/metadata/util"
 	"github.com/go-gost/x/registry"
 )
@@ -20,6 +21,7 @@ const (
 )
 
 type metadata struct {
+	tcp             transport.Options
 	readTimeout     time.Duration
 	keepalive       bool
 	compression     bool
@@ -49,6 +51,12 @@ type metadata struct {
 }
 
 func (h *httpHandler) parseMetadata(md mdata.Metadata) error {
+	tcp, err := transport.Parse(md, transport.DefaultIdleTimeout)
+	if err != nil {
+		return err
+	}
+	h.md.tcp = tcp
+
 	h.md.readTimeout = mdutil.GetDuration(md, "readTimeout")
 	if h.md.readTimeout == 0 {
 		h.md.readTimeout = 15 * time.Second

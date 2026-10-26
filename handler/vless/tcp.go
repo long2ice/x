@@ -86,6 +86,7 @@ func (h *vlessHandler) handleTCP(ctx context.Context, conn net.Conn, network, ad
 			MitmBypass:          h.md.mitmBypass,
 			ReadTimeout:         h.md.readTimeout,
 			IdleTimeout:         h.md.idleTimeout,
+			BufferSize:          h.md.bufferSize,
 		}
 
 		conn = xnet.NewReadWriteConn(br, conn, conn)

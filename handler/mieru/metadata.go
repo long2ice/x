@@ -4,14 +4,16 @@ import (
 	"time"
 
 	mdata "github.com/go-gost/core/metadata"
+	"github.com/go-gost/x/internal/util/transport"
 	mdutil "github.com/go-gost/x/metadata/util"
 )
 
 type metadata struct {
-	readTimeout  time.Duration
-	idleTimeout  time.Duration
-	enableUDP    bool
-	hash         string
+	readTimeout time.Duration
+	idleTimeout time.Duration
+	bufferSize  int
+	enableUDP   bool
+	hash        string
 
 	observerPeriod       time.Duration
 	observerResetTraffic bool
@@ -26,10 +28,12 @@ func (h *mieruHandler) parseMetadata(md mdata.Metadata) error {
 		h.md.readTimeout = 15 * time.Second
 	}
 
-	h.md.idleTimeout = mdutil.GetDuration(md, "idleTimeout")
-	if h.md.idleTimeout <= 0 {
-		h.md.idleTimeout = 5 * time.Minute
+	tcp, err := transport.Parse(md, 5*time.Minute)
+	if err != nil {
+		return err
 	}
+	h.md.idleTimeout = tcp.IdleTimeout
+	h.md.bufferSize = tcp.BufferSize
 
 	h.md.enableUDP = true
 	if md != nil && md.IsExists("udp") {

@@ -298,6 +298,8 @@ func (s *defaultService) Serve() error {
 				}()
 			}
 
+			stop := context.AfterFunc(gctx, func() { conn.Close() })
+			defer stop()
 			if err := s.handler.Handle(ctx, conn); err != nil {
 				log.Error(err)
 				if v := xmetrics.GetCounter(xmetrics.MetricServiceHandlerErrorsCounter,

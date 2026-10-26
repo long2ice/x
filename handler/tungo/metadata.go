@@ -7,6 +7,7 @@ import (
 	"time"
 
 	mdata "github.com/go-gost/core/metadata"
+	"github.com/go-gost/x/internal/util/transport"
 	mdutil "github.com/go-gost/x/metadata/util"
 )
 
@@ -35,6 +36,7 @@ type metadata struct {
 	// server-side gVisor TCB and handler goroutine alive until TCP keepalive
 	// reaps them ~5 min later. This caps that delay.
 	tcpIdleTimeout time.Duration
+	tcpBufferSize  int
 
 	sniffing                bool
 	sniffingUDP             bool
@@ -64,10 +66,12 @@ func (h *tungoHandler) parseMetadata(md mdata.Metadata) (err error) {
 	h.md.udpTimeout = mdutil.GetDuration(md, "udpTimeout", "tungo.udpTimeout")
 	h.md.udpBufferSize = mdutil.GetInt(md, "udp.bufferSize", "udpBufferSize")
 
-	h.md.tcpIdleTimeout = mdutil.GetDuration(md, "tcpIdleTimeout", "tungo.tcpIdleTimeout")
-	if h.md.tcpIdleTimeout <= 0 {
-		h.md.tcpIdleTimeout = 60 * time.Second
+	tcp, err := transport.Parse(md, 60*time.Second, "tcpIdleTimeout", "tungo.tcpIdleTimeout", "idleTimeout")
+	if err != nil {
+		return err
 	}
+	h.md.tcpIdleTimeout = tcp.IdleTimeout
+	h.md.tcpBufferSize = tcp.BufferSize
 
 	h.md.sniffing = mdutil.GetBool(md, "sniffing")
 	h.md.sniffingUDP = mdutil.GetBool(md, "sniffing.udp")
@@ -123,7 +127,7 @@ func (h *tungoHandler) parseMetadata(md mdata.Metadata) (err error) {
 	// Default on: receive-window auto-tuning is what lets the window grow
 	// toward the max on long-RTT paths. Explicit metadata still wins.
 	h.md.tcpModerateReceiveBuffer = true
-	if md.IsExists("tcpModerateReceiveBuffer") || md.IsExists("tungo.tcpModerateReceiveBuffer") {
+	if md != nil && (md.IsExists("tcpModerateReceiveBuffer") || md.IsExists("tungo.tcpModerateReceiveBuffer")) {
 		h.md.tcpModerateReceiveBuffer = mdutil.GetBool(md, "tcpModerateReceiveBuffer", "tungo.tcpModerateReceiveBuffer")
 	}
 

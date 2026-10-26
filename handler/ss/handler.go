@@ -137,6 +137,7 @@ func (h *ssHandler) Handle(ctx context.Context, conn net.Conn, opts ...handler.H
 		return rate_limiter.ErrRateLimit
 	}
 
+	conn.SetReadDeadline(time.Now().Add(h.md.readTimeout))
 	wrappedConn, err := h.server.WrapConn(conn)
 	if err != nil {
 		return
@@ -149,8 +150,6 @@ func (h *ssHandler) Handle(ctx context.Context, conn net.Conn, opts ...handler.H
 		return errors.New("ss: target not available")
 	}
 	conn = wrappedConn
-
-	conn.SetReadDeadline(time.Now().Add(h.md.readTimeout))
 
 	ro.Host = target.String()
 
@@ -215,6 +214,8 @@ func (h *ssHandler) Handle(ctx context.Context, conn net.Conn, opts ...handler.H
 			CertPool:            h.certPool,
 			MitmBypass:          h.md.mitmBypass,
 			ReadTimeout:         h.md.readTimeout,
+			IdleTimeout:         h.md.tcp.IdleTimeout,
+			BufferSize:          h.md.tcp.BufferSize,
 		}
 
 		conn = xnet.NewReadWriteConn(br, conn, conn)
@@ -241,7 +242,7 @@ func (h *ssHandler) Handle(ctx context.Context, conn net.Conn, opts ...handler.H
 	t := time.Now()
 	log.Infof("%s <-> %s", conn.RemoteAddr(), ro.Host)
 	// xnet.Transport(conn, cc)
-	xnet.Pipe(ctx, conn, cc)
+	h.md.tcp.Pipe(ctx, conn, cc, "tcp")
 	log.WithFields(map[string]any{
 		"duration": time.Since(t),
 	}).Infof("%s >-< %s", conn.RemoteAddr(), ro.Host)

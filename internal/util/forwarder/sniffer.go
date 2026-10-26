@@ -127,9 +127,15 @@ type Sniffer struct {
 	MitmBypass         bypass.Bypass
 
 	ReadTimeout time.Duration
+	IdleTimeout time.Duration
+	BufferSize  int
 }
 
 func (h *Sniffer) HandleHTTP(ctx context.Context, conn net.Conn, opts ...HandleOption) error {
+	guard := xnet.NewIdleConn(ctx, conn, h.IdleTimeout)
+	defer guard.Close()
+	ctx, conn = guard.Context(), guard
+
 	var ho HandleOptions
 	for _, opt := range opts {
 		opt(&ho)
@@ -182,6 +188,9 @@ func (h *Sniffer) HandleHTTP(ctx context.Context, conn net.Conn, opts ...HandleO
 		return err
 	}
 	defer cc.Close()
+	targetConn := cc
+	stopTarget := context.AfterFunc(ctx, func() { targetConn.Close() })
+	defer stopTarget()
 
 	ho.log = ho.log.WithFields(map[string]any{"src": cc.LocalAddr().String(), "dst": cc.RemoteAddr().String()})
 	log := ho.log
@@ -614,12 +623,10 @@ func (h *Sniffer) handleUpgradeResponse(ctx context.Context, rw, cc io.ReadWrite
 	}
 
 	// return xnet.Transport(rw, cc)
-	return xnet.Pipe(ctx, rw, cc)
+	return xnet.PipeIdleBuffer(ctx, rw, cc, h.IdleTimeout, h.BufferSize)
 }
 
-func (h *Sniffer) sniffingWebsocketFrame(ctx context.Context, rw, cc io.ReadWriter, ro *xrecorder.HandlerRecorderObject, log logger.Logger) error {
-	errc := make(chan error, 1)
-
+func (h *Sniffer) sniffingWebsocketFrame(ctx context.Context, rw, cc io.ReadWriteCloser, ro *xrecorder.HandlerRecorderObject, log logger.Logger) error {
 	sampleRate := h.WebsocketSampleRate
 	if sampleRate == 0 {
 		sampleRate = sniffing.DefaultSampleRate
@@ -627,60 +634,28 @@ func (h *Sniffer) sniffingWebsocketFrame(ctx context.Context, rw, cc io.ReadWrit
 	if sampleRate < 0 {
 		sampleRate = math.MaxFloat64
 	}
-
-	go func() {
-		ro2 := &xrecorder.HandlerRecorderObject{}
-		*ro2 = *ro
-		ro := ro2
-
+	xnet.PipeIdleFunc(ctx, rw, cc, h.IdleTimeout, func(ctx context.Context, dst, src io.ReadWriter, clientToServer bool) error {
+		record := *ro
 		limiter := rate.NewLimiter(rate.Limit(sampleRate), int(sampleRate))
-
 		buf := &bytes.Buffer{}
+		from := "server"
+		if clientToServer {
+			from = "client"
+		}
 		for {
 			start := time.Now()
-
-			if err := h.copyWebsocketFrame(cc, rw, buf, "client", ro); err != nil {
-				errc <- err
-				return
+			if err := h.copyWebsocketFrame(dst, src, buf, from, &record); err != nil {
+				return err
 			}
-
 			if limiter.Allow() {
-				ro.Duration = time.Since(start)
-				ro.Time = time.Now()
-				if err := ro.Record(ctx, h.Recorder); err != nil {
+				record.Duration = time.Since(start)
+				record.Time = time.Now()
+				if err := record.Record(ctx, h.Recorder); err != nil {
 					log.Errorf("record: %v", err)
 				}
 			}
 		}
-	}()
-
-	go func() {
-		ro2 := &xrecorder.HandlerRecorderObject{}
-		*ro2 = *ro
-		ro := ro2
-
-		limiter := rate.NewLimiter(rate.Limit(sampleRate), int(sampleRate))
-
-		buf := &bytes.Buffer{}
-		for {
-			start := time.Now()
-
-			if err := h.copyWebsocketFrame(rw, cc, buf, "server", ro); err != nil {
-				errc <- err
-				return
-			}
-
-			if limiter.Allow() {
-				ro.Duration = time.Since(start)
-				ro.Time = time.Now()
-				if err := ro.Record(ctx, h.Recorder); err != nil {
-					log.Errorf("record: %v", err)
-				}
-			}
-		}
-	}()
-
-	<-errc
+	})
 	return nil
 }
 
@@ -874,7 +849,7 @@ func (h *Sniffer) HandleTLS(ctx context.Context, conn net.Conn, opts ...HandleOp
 
 	log.Infof("%s <-> %s", ro.RemoteAddr, ro.Host)
 	// xnet.Transport(conn, cc)
-	xnet.Pipe(ctx, conn, cc)
+	xnet.PipeIdleBuffer(ctx, conn, cc, h.IdleTimeout, h.BufferSize)
 	log.WithFields(map[string]any{
 		"duration": time.Since(ro.Time),
 	}).Infof("%s >-< %s", ro.RemoteAddr, ro.Host)

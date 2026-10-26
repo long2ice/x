@@ -174,7 +174,7 @@ func (h *socks5Handler) serveBind(ctx context.Context, conn net.Conn, ln net.Lis
 		start := time.Now()
 		log.Debugf("%s <-> %s", rc.LocalAddr(), rc.RemoteAddr())
 		// xnet.Transport(pc2, rc)
-		xnet.Pipe(ctx, pc2, rc)
+		h.md.tcp.Pipe(ctx, pc2, rc, "tcp")
 		log.WithFields(map[string]any{"duration": time.Since(start)}).
 			Debugf("%s >-< %s", rc.LocalAddr(), rc.RemoteAddr())
 

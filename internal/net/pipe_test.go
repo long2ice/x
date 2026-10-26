@@ -135,3 +135,38 @@ func TestPipeIdleBufferClosesFullyIdleConnection(t *testing.T) {
 		t.Fatal("fully idle pipe was not closed")
 	}
 }
+
+func TestPipeIdleKeepsOneWayTrafficAlive(t *testing.T) {
+	client, left := net.Pipe()
+	right, target := net.Pipe()
+	t.Cleanup(func() { client.Close(); target.Close() })
+	client.SetDeadline(time.Now().Add(2 * time.Second))
+	target.SetDeadline(time.Now().Add(2 * time.Second))
+	const idle = 250 * time.Millisecond
+	done := make(chan error, 1)
+	go func() { done <- PipeIdle(context.Background(), left, right, idle) }()
+	for range 12 {
+		write := make(chan error, 1)
+		go func() { _, err := client.Write([]byte{1}); write <- err }()
+		var b [1]byte
+		if _, err := io.ReadFull(target, b[:]); err != nil {
+			t.Fatalf("one-way transfer was interrupted: %v", err)
+		}
+		if err := <-write; err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("active connection closed: %v", err)
+	default:
+	}
+	client.Close()
+	target.Close()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("pipe did not stop")
+	}
+}

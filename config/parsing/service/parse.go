@@ -240,6 +240,12 @@ func ParseService(cfg *config.ServiceConfig) (service.Service, error) {
 		listenerLogger.Error("init: ", err)
 		return nil, err
 	}
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			ln.Close()
+		}
+	}()
 
 	handlerLogger := serviceLogger.WithFields(map[string]any{
 		"kind": "handler",
@@ -363,6 +369,7 @@ func ParseService(cfg *config.ServiceConfig) (service.Service, error) {
 	s := xservice.NewService(cfg.Name, ln, h, serviceOpts...)
 
 	serviceLogger.Infof("listening on %s/%s", s.Addr().String(), s.Addr().Network())
+	handedOff = true
 	return s, nil
 }
 

@@ -8,11 +8,13 @@ import (
 
 	"github.com/go-gost/core/bypass"
 	mdata "github.com/go-gost/core/metadata"
+	"github.com/go-gost/x/internal/util/transport"
 	mdutil "github.com/go-gost/x/metadata/util"
 	"github.com/go-gost/x/registry"
 )
 
 type metadata struct {
+	tcp           transport.Options
 	readTimeout   time.Duration
 	proxyProtocol int
 	httpKeepalive bool
@@ -31,6 +33,12 @@ type metadata struct {
 }
 
 func (h *forwardHandler) parseMetadata(md mdata.Metadata) (err error) {
+	tcp, err := transport.Parse(md, transport.DefaultIdleTimeout)
+	if err != nil {
+		return err
+	}
+	h.md.tcp = tcp
+
 	h.md.readTimeout = mdutil.GetDuration(md, "readTimeout")
 	if h.md.readTimeout <= 0 {
 		h.md.readTimeout = 15 * time.Second

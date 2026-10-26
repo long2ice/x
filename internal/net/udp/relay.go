@@ -131,5 +131,16 @@ func (r *Relay) Run(ctx context.Context) (err error) {
 		}
 	}()
 
-	return <-errc
+	var remaining = 2
+	select {
+	case err = <-errc:
+		remaining--
+	case <-ctx.Done():
+	}
+	r.pc1.Close()
+	r.pc2.Close()
+	for ; remaining > 0; remaining-- {
+		<-errc
+	}
+	return err
 }

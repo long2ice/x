@@ -401,6 +401,8 @@ func (h *httpHandler) handleRequest(ctx context.Context, conn net.Conn, req *htt
 			CertPool:            h.certPool,
 			MitmBypass:          h.md.mitmBypass,
 			ReadTimeout:         h.md.readTimeout,
+			IdleTimeout:         h.md.tcp.IdleTimeout,
+			BufferSize:          h.md.tcp.BufferSize,
 		}
 
 		conn = xnet.NewReadWriteConn(br, conn, conn)
@@ -427,7 +429,7 @@ func (h *httpHandler) handleRequest(ctx context.Context, conn net.Conn, req *htt
 	start := time.Now()
 	log.Infof("%s <-> %s", conn.RemoteAddr(), addr)
 	// xnet.Transport(conn, cc)
-	xnet.Pipe(ctx, conn, cc)
+	h.md.tcp.Pipe(ctx, conn, cc, "tcp")
 	log.WithFields(map[string]any{
 		"duration": time.Since(start),
 	}).Infof("%s >-< %s", conn.RemoteAddr(), addr)
@@ -436,6 +438,10 @@ func (h *httpHandler) handleRequest(ctx context.Context, conn net.Conn, req *htt
 }
 
 func (h *httpHandler) handleProxy(ctx context.Context, conn net.Conn, req *http.Request, ro *xrecorder.HandlerRecorderObject, log logger.Logger) error {
+	guard := xnet.NewIdleConn(ctx, conn, h.md.tcp.IdleTimeout)
+	defer guard.Close()
+	ctx, conn = guard.Context(), guard
+
 	pStats := xstats.Stats{}
 	conn = stats_wrapper.WrapConn(conn, &pStats)
 
@@ -693,12 +699,10 @@ func (h *httpHandler) handleUpgradeResponse(ctx context.Context, rw io.ReadWrite
 	}
 
 	// return xnet.Transport(rw, backConn)
-	return xnet.Pipe(ctx, rw, backConn)
+	return h.md.tcp.Pipe(ctx, rw, backConn, "tcp")
 }
 
-func (h *httpHandler) sniffingWebsocketFrame(ctx context.Context, rw, cc io.ReadWriter, ro *xrecorder.HandlerRecorderObject, log logger.Logger) error {
-	errc := make(chan error, 1)
-
+func (h *httpHandler) sniffingWebsocketFrame(ctx context.Context, rw, cc io.ReadWriteCloser, ro *xrecorder.HandlerRecorderObject, log logger.Logger) error {
 	sampleRate := h.md.sniffingWebsocketSampleRate
 	if sampleRate == 0 {
 		sampleRate = sniffing.DefaultSampleRate
@@ -706,60 +710,28 @@ func (h *httpHandler) sniffingWebsocketFrame(ctx context.Context, rw, cc io.Read
 	if sampleRate < 0 {
 		sampleRate = math.MaxFloat64
 	}
-
-	go func() {
-		ro2 := &xrecorder.HandlerRecorderObject{}
-		*ro2 = *ro
-		ro := ro2
-
+	xnet.PipeIdleFunc(ctx, rw, cc, h.md.tcp.IdleTimeout, func(ctx context.Context, dst, src io.ReadWriter, clientToServer bool) error {
+		record := *ro
 		limiter := rate.NewLimiter(rate.Limit(sampleRate), int(sampleRate))
-
 		buf := &bytes.Buffer{}
+		from := "server"
+		if clientToServer {
+			from = "client"
+		}
 		for {
 			start := time.Now()
-
-			if err := h.copyWebsocketFrame(cc, rw, buf, "client", ro); err != nil {
-				errc <- err
-				return
+			if err := h.copyWebsocketFrame(dst, src, buf, from, &record); err != nil {
+				return err
 			}
-
 			if limiter.Allow() {
-				ro.Duration = time.Since(start)
-				ro.Time = time.Now()
-				if err := ro.Record(ctx, h.recorder.Recorder); err != nil {
+				record.Duration = time.Since(start)
+				record.Time = time.Now()
+				if err := record.Record(ctx, h.recorder.Recorder); err != nil {
 					log.Errorf("record: %v", err)
 				}
 			}
 		}
-	}()
-
-	go func() {
-		ro2 := &xrecorder.HandlerRecorderObject{}
-		*ro2 = *ro
-		ro := ro2
-
-		limiter := rate.NewLimiter(rate.Limit(sampleRate), int(sampleRate))
-
-		buf := &bytes.Buffer{}
-		for {
-			start := time.Now()
-
-			if err := h.copyWebsocketFrame(rw, cc, buf, "server", ro); err != nil {
-				errc <- err
-				return
-			}
-
-			if limiter.Allow() {
-				ro.Duration = time.Since(start)
-				ro.Time = time.Now()
-				if err := ro.Record(ctx, h.recorder.Recorder); err != nil {
-					log.Errorf("record: %v", err)
-				}
-			}
-		}
-	}()
-
-	<-errc
+	})
 	return nil
 }
 
@@ -892,7 +864,7 @@ func (h *httpHandler) authenticate(ctx context.Context, conn net.Conn, req *http
 
 			req.Write(cc)
 			// xnet.Transport(conn, cc)
-			xnet.Pipe(ctx, conn, cc)
+			h.md.tcp.Pipe(ctx, conn, cc, "tcp")
 			return
 		case "file":
 			f, _ := os.Open(pr.Value)

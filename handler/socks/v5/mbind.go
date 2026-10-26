@@ -163,7 +163,7 @@ func (h *socks5Handler) serveMuxBind(ctx context.Context, conn net.Conn, ln net.
 			t := time.Now()
 			log.Debugf("%s <-> %s", c.LocalAddr(), c.RemoteAddr())
 			// xnet.Transport(sc, c)
-			xnet.Pipe(ctx, sc, c)
+			h.md.tcp.Pipe(ctx, sc, c, "tcp")
 			log.WithFields(map[string]any{"duration": time.Since(t)}).
 				Debugf("%s >-< %s", c.LocalAddr(), c.RemoteAddr())
 		}(rc)

@@ -231,3 +231,73 @@ func TestHandleUDPPreservesLargeDatagrams(t *testing.T) {
 		t.Fatalf("UDP datagram changed: got %d bytes, want %d", len(response), len(payload))
 	}
 }
+
+func TestBindReclaimsStreamsWithoutClosingControl(t *testing.T) {
+	log := xlogger.Nop()
+	h := NewHandler(handler.LoggerOption(log))
+	if err := h.Init(xmd.NewMetadata(map[string]any{"bind": true, "idleTimeout": "100ms"})); err != nil {
+		t.Fatal(err)
+	}
+	defer h.(*relayHandler).Close()
+	client, server := net.Pipe()
+	t.Cleanup(func() { client.Close(); server.Close() })
+	go h.Handle(context.Background(), server)
+	client.SetDeadline(time.Now().Add(3 * time.Second))
+	req := &protocol.Request{Version: protocol.Version1, Cmd: protocol.CmdBind, Features: []protocol.Feature{&protocol.AddrFeature{Host: "127.0.0.1"}}}
+	if _, err := req.WriteTo(client); err != nil {
+		t.Fatal(err)
+	}
+	response := &protocol.Response{}
+	if _, err := response.ReadFrom(client); err != nil || response.Status != protocol.StatusOK {
+		t.Fatalf("bind: %v, %v", response, err)
+	}
+	var address string
+	for _, feature := range response.Features {
+		if addr, ok := feature.(*protocol.AddrFeature); ok {
+			address = net.JoinHostPort(addr.Host, strconv.Itoa(int(addr.Port)))
+		}
+	}
+	if address == "" {
+		t.Fatal("missing bind address")
+	}
+	client.SetDeadline(time.Time{})
+	session, err := mux.ServerSession(client, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	time.Sleep(250 * time.Millisecond)
+	for range 2 {
+		incoming, err := net.DialTimeout("tcp", address, time.Second)
+		if err != nil {
+			t.Fatalf("idle control connection lost its listener: %v", err)
+		}
+		t.Cleanup(func() { incoming.Close() })
+		accepted := make(chan net.Conn, 1)
+		go func() {
+			if conn, err := session.Accept(); err == nil {
+				accepted <- conn
+			}
+		}()
+		var stream net.Conn
+		select {
+		case stream = <-accepted:
+		case <-time.After(time.Second):
+			t.Fatal("bind stream was not opened")
+		}
+		t.Cleanup(func() { stream.Close() })
+		stream.SetDeadline(time.Now().Add(time.Second))
+		incoming.SetDeadline(time.Now().Add(time.Second))
+		response := &protocol.Response{}
+		if _, err := response.ReadFrom(stream); err != nil || response.Status != protocol.StatusOK {
+			t.Fatalf("bind stream response: %v, %v", response, err)
+		}
+		var b [1]byte
+		if _, err := stream.Read(b[:]); err != io.EOF {
+			t.Fatalf("idle bind stream was not reclaimed: %v", err)
+		}
+		if _, err := incoming.Read(b[:]); err != io.EOF {
+			t.Fatalf("idle bind TCP peer was not reclaimed: %v", err)
+		}
+	}
+}

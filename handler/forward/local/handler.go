@@ -179,6 +179,8 @@ func (h *forwardHandler) Handle(ctx context.Context, conn net.Conn, opts ...hand
 			CertPool:            h.certPool,
 			MitmBypass:          h.md.mitmBypass,
 			ReadTimeout:         h.md.readTimeout,
+			IdleTimeout:         h.md.tcp.IdleTimeout,
+			BufferSize:          h.md.tcp.BufferSize,
 		}
 
 		conn = xnet.NewReadWriteConn(br, conn, conn)
@@ -270,7 +272,7 @@ func (h *forwardHandler) Handle(ctx context.Context, conn net.Conn, opts ...hand
 	t := time.Now()
 	log.Infof("%s <-> %s", conn.RemoteAddr(), target.Addr)
 	// xnet.Transport(conn, cc)
-	xnet.Pipe(ctx, conn, cc)
+	h.md.tcp.Pipe(ctx, conn, cc, network)
 	log.WithFields(map[string]any{
 		"duration": time.Since(t),
 	}).Infof("%s >-< %s", conn.RemoteAddr(), target.Addr)

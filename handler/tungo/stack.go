@@ -54,6 +54,7 @@ type transportHandler struct {
 	// tcpIdleTimeout caps how long a proxied TCP conn may stay fully idle
 	// before being force-closed. See metadata.tcpIdleTimeout for context.
 	tcpIdleTimeout time.Duration
+	tcpBufferSize  int
 
 	sniffing                bool
 	sniffingUDP             bool
@@ -231,6 +232,7 @@ func (h *transportHandler) handleTCPConn(originConn adapter.TCPConn) {
 			RecorderOptions: h.recorder.Options,
 			ReadTimeout:     h.sniffingResponseTimeout,
 			IdleTimeout:     h.tcpIdleTimeout,
+			BufferSize:      h.tcpBufferSize,
 		}
 
 		conn = xnet.NewReadWriteConn(br, conn, conn)
@@ -278,7 +280,7 @@ func (h *transportHandler) handleTCPConn(originConn adapter.TCPConn) {
 
 	t := time.Now()
 	log.Infof("%s <-> %s", remoteAddr, dstAddr)
-	xnet.PipeIdle(ctx, conn, cc, h.tcpIdleTimeout)
+	xnet.PipeIdleBuffer(ctx, conn, cc, h.tcpIdleTimeout, h.tcpBufferSize)
 	log.WithFields(map[string]any{
 		"duration": time.Since(t),
 	}).Infof("%s >-< %s", remoteAddr, dstAddr)

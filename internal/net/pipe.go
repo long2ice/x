@@ -19,14 +19,10 @@ func Pipe(ctx context.Context, rw1, rw2 io.ReadWriteCloser) error {
 	return pipe(ctx, rw1, rw2, 0, bufferSize/2, false)
 }
 
-// PipeIdle behaves like Pipe but bounds each direction by an idle timeout: if
-// no bytes are read from src for idleTimeout the goroutine returns and
-// initiates the half-close. Set idleTimeout to 0 to disable (equivalent to
-// Pipe). Useful for proxied TCP that may be silently abandoned by a peer
-// (e.g. mobile network switch) so the server doesn't have to wait for TCP
-// keepalive (~5 min) to reclaim the goroutine and gVisor TCB.
+// PipeIdle bounds inactivity across the whole connection. Traffic in either
+// direction keeps both copy loops alive. Zero disables idle reclamation.
 func PipeIdle(ctx context.Context, rw1, rw2 io.ReadWriteCloser, idleTimeout time.Duration) error {
-	return pipe(ctx, rw1, rw2, idleTimeout, bufferSize/2, false)
+	return PipeIdleBuffer(ctx, rw1, rw2, idleTimeout, bufferSize/2)
 }
 
 // PipeIdleBuffer behaves like PipeIdle but uses bufferSize bytes for each copy
@@ -119,7 +115,12 @@ func newPipeActivity() *pipeActivity {
 }
 
 func (a *pipeActivity) touch() {
-	a.last.Store(time.Since(a.start).Nanoseconds())
+	stamp := time.Since(a.start).Nanoseconds()
+	for previous := a.last.Load(); stamp > previous; previous = a.last.Load() {
+		if a.last.CompareAndSwap(previous, stamp) {
+			return
+		}
+	}
 }
 
 func (a *pipeActivity) remaining(idle time.Duration) time.Duration {
@@ -128,6 +129,65 @@ func (a *pipeActivity) remaining(idle time.Duration) time.Duration {
 		return 0
 	}
 	return idle - idleFor
+}
+
+type activityReadWriter struct {
+	io.ReadWriter
+	activity *pipeActivity
+}
+
+func (rw *activityReadWriter) Read(p []byte) (int, error) {
+	n, err := rw.ReadWriter.Read(p)
+	if n > 0 {
+		rw.activity.touch()
+	}
+	return n, err
+}
+
+// PipeIdleFunc runs a protocol-aware copier in each direction. It tracks reads
+// within frames, closes both endpoints on exit, and waits for both workers.
+func PipeIdleFunc(ctx context.Context, client, target io.ReadWriteCloser, idle time.Duration,
+	copyFn func(context.Context, io.ReadWriter, io.ReadWriter, bool) error) error {
+	copyCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	activity := newPipeActivity()
+	left := &activityReadWriter{ReadWriter: client, activity: activity}
+	right := &activityReadWriter{ReadWriter: target, activity: activity}
+	done := make(chan error, 2)
+	go func() { done <- copyFn(copyCtx, right, left, true) }()
+	go func() { done <- copyFn(copyCtx, left, right, false) }()
+	var timer *time.Timer
+	var expired <-chan time.Time
+	if idle > 0 {
+		timer = time.NewTimer(idle)
+		expired = timer.C
+		defer timer.Stop()
+	}
+	var err error
+	remaining := 2
+wait:
+	for {
+		select {
+		case err = <-done:
+			remaining--
+			break wait
+		case <-ctx.Done():
+			break wait
+		case <-expired:
+			if delay := activity.remaining(idle); delay > 0 {
+				timer.Reset(delay)
+				continue
+			}
+			break wait
+		}
+	}
+	cancel()
+	client.Close()
+	target.Close()
+	for ; remaining > 0; remaining-- {
+		<-done
+	}
+	return err
 }
 
 func pipeBuffer(dst io.ReadWriteCloser, src io.ReadWriteCloser, bufferSize int, idle time.Duration, activity *pipeActivity) error {

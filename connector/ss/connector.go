@@ -108,7 +108,9 @@ func (c *ssConnector) Connect(ctx context.Context, conn net.Conn, network, addre
 
 	var sc net.Conn
 	if c.md.noDelay {
-		err := conn.(core.TCPConn).ClientFirstWrite()
+		// TCPClient.WrapConn returns a lazy client wrapper, not core.TCPConn.
+		// An empty write initializes it and sends the target header immediately.
+		_, err := conn.Write(nil)
 		if err != nil {
 			return nil, err
 		}
