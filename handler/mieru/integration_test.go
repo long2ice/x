@@ -30,6 +30,7 @@ func TestOfficialMieruClient(t *testing.T) {
 	if err != nil {
 		t.Skip("mieru client not found in PATH")
 	}
+	clientConfigPath := filepath.Join(t.TempDir(), "client-config.json")
 
 	httpPort := freeTCPPort(t)
 	mieruPort := freeTCPPort(t)
@@ -117,13 +118,11 @@ func TestOfficialMieruClient(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	runMieru(t, mieruBin, "stop")
-	t.Cleanup(func() { runMieru(t, mieruBin, "stop") })
-
-	if out, err := exec.Command(mieruBin, "apply", "config", cfgPath).CombinedOutput(); err != nil {
+	if out, err := mieruCommand(mieruBin, clientConfigPath, "apply", "config", cfgPath).CombinedOutput(); err != nil {
 		t.Fatalf("mieru apply config: %v\n%s", err, out)
 	}
-	startCmd := exec.Command(mieruBin, "start")
+	t.Cleanup(func() { runMieru(t, mieruBin, clientConfigPath, "stop") })
+	startCmd := mieruCommand(mieruBin, clientConfigPath, "start")
 	startCmd.Stdout = os.Stdout
 	startCmd.Stderr = os.Stderr
 	if err := startCmd.Run(); err != nil {
@@ -132,7 +131,7 @@ func TestOfficialMieruClient(t *testing.T) {
 	waitTCP(t, socksPort)
 
 	testURL := fmt.Sprintf("http://127.0.0.1:%d/", httpPort)
-	if out, err := exec.Command(mieruBin, "test", testURL).CombinedOutput(); err != nil {
+	if out, err := mieruCommand(mieruBin, clientConfigPath, "test", testURL).CombinedOutput(); err != nil {
 		t.Fatalf("mieru test %s: %v\n%s", testURL, err, out)
 	}
 	t.Logf("mieru client test succeeded via socks5://127.0.0.1:%d -> %s", socksPort, testURL)
@@ -151,6 +150,7 @@ func TestOfficialMieruClientUDPTransport(t *testing.T) {
 	if err != nil {
 		t.Skip("mieru client not found in PATH")
 	}
+	clientConfigPath := filepath.Join(t.TempDir(), "client-config.json")
 
 	httpPort := freeTCPPort(t)
 	mieruPort := freeUDPPort(t)
@@ -239,13 +239,11 @@ func TestOfficialMieruClientUDPTransport(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	runMieru(t, mieruBin, "stop")
-	t.Cleanup(func() { runMieru(t, mieruBin, "stop") })
-
-	if out, err := exec.Command(mieruBin, "apply", "config", cfgPath).CombinedOutput(); err != nil {
+	if out, err := mieruCommand(mieruBin, clientConfigPath, "apply", "config", cfgPath).CombinedOutput(); err != nil {
 		t.Fatalf("mieru apply config: %v\n%s", err, out)
 	}
-	startCmd := exec.Command(mieruBin, "start")
+	t.Cleanup(func() { runMieru(t, mieruBin, clientConfigPath, "stop") })
+	startCmd := mieruCommand(mieruBin, clientConfigPath, "start")
 	startCmd.Stdout = os.Stdout
 	startCmd.Stderr = os.Stderr
 	if err := startCmd.Run(); err != nil {
@@ -254,15 +252,26 @@ func TestOfficialMieruClientUDPTransport(t *testing.T) {
 	waitTCP(t, socksPort)
 
 	testURL := fmt.Sprintf("http://127.0.0.1:%d/", httpPort)
-	if out, err := exec.Command(mieruBin, "test", testURL).CombinedOutput(); err != nil {
+	if out, err := mieruCommand(mieruBin, clientConfigPath, "test", testURL).CombinedOutput(); err != nil {
 		t.Fatalf("mieru test %s: %v\n%s", testURL, err, out)
 	}
 	t.Logf("mieru UDP transport test succeeded via socks5://127.0.0.1:%d -> %s", socksPort, testURL)
 }
 
-func runMieru(t *testing.T, bin string, args ...string) {
+func mieruCommand(bin, configPath string, args ...string) *exec.Cmd {
+	cmd := exec.Command(bin, args...)
+	for _, entry := range os.Environ() {
+		if !strings.HasPrefix(entry, "MIERU_CONFIG_FILE=") && !strings.HasPrefix(entry, "MIERU_CONFIG_JSON_FILE=") {
+			cmd.Env = append(cmd.Env, entry)
+		}
+	}
+	cmd.Env = append(cmd.Env, "MIERU_CONFIG_JSON_FILE="+configPath)
+	return cmd
+}
+
+func runMieru(t *testing.T, bin, configPath string, args ...string) {
 	t.Helper()
-	out, err := exec.Command(bin, args...).CombinedOutput()
+	out, err := mieruCommand(bin, configPath, args...).CombinedOutput()
 	if err != nil && len(args) == 1 && args[0] == "stop" {
 		return
 	}

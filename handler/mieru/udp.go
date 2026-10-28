@@ -8,7 +8,6 @@ import (
 	"io"
 	"net"
 	"sync"
-	"sync/atomic"
 
 	apicommon "github.com/enfein/mieru/v3/apis/common"
 	"github.com/enfein/mieru/v3/apis/model"
@@ -27,7 +26,16 @@ func runUDPAssociateLoop(ctx context.Context, tunnel *apicommon.PacketOverStream
 		resolver = &net.Resolver{}
 	}
 
-	var udpErr atomic.Value
+	var udpErr error
+	var stopOnce sync.Once
+	stop := func(err error) {
+		stopOnce.Do(func() {
+			udpErr = err
+			// Unblock the other direction when either side stops forwarding.
+			_ = tunnel.Close()
+			_ = upstream.Close()
+		})
+	}
 	var addrMap sync.Map
 
 	var wg sync.WaitGroup
@@ -39,13 +47,13 @@ func runUDPAssociateLoop(ctx context.Context, tunnel *apicommon.PacketOverStream
 		for {
 			n, err := tunnel.Read(buf)
 			if err != nil {
-				udpErr.Store(err)
+				stop(err)
 				return
 			}
 
 			datagram, err := parseSocks5UDPDatagram(buf[:n])
 			if err != nil {
-				udpErr.Store(err)
+				stop(err)
 				return
 			}
 
@@ -80,9 +88,7 @@ func runUDPAssociateLoop(ctx context.Context, tunnel *apicommon.PacketOverStream
 		for {
 			n, addr, err := upstream.ReadFrom(buf)
 			if err != nil {
-				if udpErr.Load() == nil {
-					udpErr.Store(err)
-				}
+				stop(err)
 				return
 			}
 
@@ -92,28 +98,21 @@ func runUDPAssociateLoop(ctx context.Context, tunnel *apicommon.PacketOverStream
 			} else {
 				header, err = udpAddrHeader(addr)
 				if err != nil {
-					udpErr.Store(err)
+					stop(err)
 					return
 				}
 				addrMap.Store(addr.String(), header)
 			}
 
 			if _, err := tunnel.Write(append(append([]byte(nil), header...), buf[:n]...)); err != nil {
-				if udpErr.Load() == nil {
-					udpErr.Store(err)
-				}
+				stop(err)
 				return
 			}
 		}
 	}()
 
 	wg.Wait()
-	if v := udpErr.Load(); v != nil {
-		if err, ok := v.(error); ok {
-			return err
-		}
-	}
-	return nil
+	return udpErr
 }
 
 type socks5UDPDatagram struct {
